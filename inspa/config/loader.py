@@ -6,6 +6,7 @@
 """
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -48,6 +49,18 @@ class ConfigValidationError(ConfigError):
     def format_errors_json(self) -> str:
         """格式化错误信息为 JSON 格式"""
         return json.dumps(self.errors, ensure_ascii=False, indent=2)
+
+
+@dataclass
+class ValidationResult:
+    """配置验证结果"""
+    is_valid: bool
+    errors: List[str] = None
+    config: Optional[InspaConfig] = None
+    
+    def __post_init__(self):
+        if self.errors is None:
+            self.errors = []
 
 
 class ConfigLoader:
@@ -265,6 +278,35 @@ def load_config(config_path: Union[str, Path]) -> InspaConfig:
 def validate_config(config_path: Union[str, Path]) -> List[Dict[str, Any]]:
     """便捷函数：验证配置文件"""
     return config_loader.validate_file(config_path)
+
+
+def validate_config_with_result(config_or_path: Union[InspaConfig, str, Path]) -> ValidationResult:
+    """验证配置并返回详细结果"""
+    try:
+        if isinstance(config_or_path, (str, Path)):
+            config = load_config(config_or_path)
+        else:
+            config = config_or_path
+        
+        # 如果能成功加载，说明验证通过
+        return ValidationResult(is_valid=True, config=config)
+        
+    except ConfigValidationError as e:
+        # Pydantic 验证错误
+        error_messages = []
+        for error in e.errors:
+            loc = " -> ".join(str(item) for item in error.get('loc', []))
+            msg = error.get('msg', '未知错误')
+            if loc:
+                error_messages.append(f"字段 '{loc}': {msg}")
+            else:
+                error_messages.append(f"根级别: {msg}")
+        
+        return ValidationResult(is_valid=False, errors=error_messages)
+        
+    except Exception as e:
+        # 其他错误 (文件读取、YAML解析等)
+        return ValidationResult(is_valid=False, errors=[f"配置加载失败: {str(e)}"])
 
 
 def save_config(config: InspaConfig, output_path: Union[str, Path]) -> None:

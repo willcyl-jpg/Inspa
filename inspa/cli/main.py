@@ -14,7 +14,7 @@ from rich.console import Console
 from rich.table import Table
 
 from .. import __version__
-from ..config import load_config, validate_config, ConfigValidationError, ConfigError
+from ..config import load_config, validate_config, validate_config_with_result, ConfigValidationError, ConfigError
 from ..utils import configure_logging
 from .commands import build, validate, inspect, extract, gui
 

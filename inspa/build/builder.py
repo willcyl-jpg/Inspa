@@ -9,21 +9,20 @@ import io
 import shutil
 import time
 import traceback
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
 from ..config.schema import InspaConfig
 from ..utils import (
-    get_stage_logger,
-    LogStage,
     ensure_directory,
     get_temp_dir,
     format_size,
 )
+from ..utils.logging import info, success, error, warning, LogStage
 from .collector import FileCollector, FileInfo
 from .compressor import CompressorFactory, CompressionError
 from .header import HeaderBuilder, HashCalculator
-
 
 # 进度回调类型
 ProgressCallback = Callable[[str, int, int, str], None]
@@ -32,6 +31,17 @@ ProgressCallback = Callable[[str, int, int, str], None]
 class BuildError(Exception):
     """构建错误"""
     pass
+
+
+@dataclass
+class BuildResult:
+    """构建结果"""
+    success: bool
+    output_path: Optional[Path] = None
+    output_size: Optional[int] = None
+    build_time: Optional[float] = None
+    compression_ratio: Optional[float] = None
+    error: Optional[str] = None
 
 
 class Builder:
@@ -47,7 +57,6 @@ class Builder:
             builder_version: 构建器版本号
         """
         self.builder_version = builder_version
-        self.logger = get_stage_logger(LogStage.INIT)
         
         # 各个组件
         self.collector = FileCollector()
@@ -68,7 +77,7 @@ class Builder:
         config: InspaConfig,
         output_path: Path,
         progress_callback: Optional[ProgressCallback] = None
-    ) -> None:
+    ) -> BuildResult:
         """构建安装器
         
         Args:
@@ -82,7 +91,7 @@ class Builder:
         self.build_stats['start_time'] = time.time()
         
         try:
-            self.logger.info("开始构建安装器", output_path=str(output_path))
+            info(f"开始构建安装器: {output_path}", stage=LogStage.INIT)
             
             # 步骤 1: 收集文件
             if progress_callback:
@@ -143,21 +152,35 @@ class Builder:
                     1.0 - self.build_stats['compressed_size'] / self.build_stats['total_size']
                 ) * 100
             
-            self.logger.info(
-                "构建完成",
-                duration=f"{self.build_stats['end_time'] - self.build_stats['start_time']:.2f}s",
-                total_files=self.build_stats['total_files'],
-                original_size=format_size(self.build_stats['total_size']),
-                compressed_size=format_size(self.build_stats['compressed_size']),
-                compression_ratio=f"{self.build_stats['compression_ratio']:.1f}%"
+            success("构建完成", stage=LogStage.DONE)
+            info(f"  构建时间: {self.build_stats['end_time'] - self.build_stats['start_time']:.2f}s")
+            info(f"  文件总数: {self.build_stats['total_files']}")
+            info(f"  原始大小: {format_size(self.build_stats['total_size'])}")
+            info(f"  压缩大小: {format_size(self.build_stats['compressed_size'])}")
+            info(f"  压缩率: {self.build_stats['compression_ratio']:.1f}%")
+            
+            # 返回构建结果
+            final_size = output_path.stat().st_size
+            build_time = self.build_stats['end_time'] - self.build_stats['start_time']
+            
+            return BuildResult(
+                success=True,
+                output_path=output_path,
+                output_size=final_size,
+                build_time=build_time,
+                compression_ratio=self.build_stats['compression_ratio'] / 100.0  # 转换为比例
             )
             
         except Exception as e:
             self.build_stats['end_time'] = time.time()
-            self.logger.error("构建失败", error=str(e), traceback=traceback.format_exc())
+            error(f"构建失败: {e}", stage=LogStage.ERROR)
+            error(f"详细错误信息:\n{traceback.format_exc()}")
+            
+            error_msg = str(e)
             if isinstance(e, BuildError):
-                raise
-            raise BuildError(f"构建失败: {e}") from e
+                return BuildResult(success=False, error=error_msg)
+            
+            return BuildResult(success=False, error=f"构建失败: {error_msg}")
     
     def get_build_stats(self) -> dict:
         """获取构建统计信息"""
@@ -165,22 +188,21 @@ class Builder:
     
     def _collect_files(self, config: InspaConfig) -> list[FileInfo]:
         """收集文件"""
-        logger = get_stage_logger(LogStage.COLLECT)
-        logger.info("开始收集文件", input_count=len(config.inputs))
+        info(f"收集文件 - 输入源: {len(config.inputs)}", stage=LogStage.COLLECT)
         
         try:
             files = self.collector.collect_files(config.inputs, config.exclude)
             
             stats = self.collector.get_statistics()
-            logger.info(
-                "文件收集完成",
-                **stats
-            )
+            success("文件收集完成", stage=LogStage.COLLECT)
+            info(f"  收集文件: {stats.get('files_collected', 0)}")
+            info(f"  跳过文件: {stats.get('files_skipped', 0)}")
+            info(f"  总大小: {format_size(stats.get('total_size', 0))}")
             
             return files
             
         except Exception as e:
-            logger.error("文件收集失败", error=str(e), traceback=traceback.format_exc())
+            error(f"文件收集失败: {e}", stage=LogStage.COLLECT)
             raise BuildError(f"文件收集失败: {e}") from e
     
     def _compress_files(
@@ -190,8 +212,7 @@ class Builder:
         progress_callback: Optional[ProgressCallback]
     ) -> tuple[bytes, str]:
         """压缩文件"""
-        logger = get_stage_logger(LogStage.COMPRESS)
-        logger.info("开始压缩文件", algorithm=config.compression.algo.value, level=config.compression.level)
+        info(f"压缩文件 - 算法: {config.compression.algo.value}, 级别: {config.compression.level}", stage=LogStage.COMPRESS)
         
         try:
             # 创建压缩器
@@ -204,11 +225,8 @@ class Builder:
             actual_algorithm = compressor.get_algorithm().value
             
             if actual_algorithm != config.compression.algo.value:
-                logger.warning(
-                    "压缩算法回退",
-                    requested=config.compression.algo.value,
-                    actual=actual_algorithm
-                )
+                warning(f"压缩算法回退: {config.compression.algo.value} -> {actual_algorithm}", stage=LogStage.COMPRESS)
+                
             
             # 压缩到内存
             output_buffer = io.BytesIO()
@@ -230,21 +248,22 @@ class Builder:
             
             compressed_data = output_buffer.getvalue()
             
-            logger.info(
-                "压缩完成",
-                algorithm=actual_algorithm,
-                original_size=format_size(sum(f.size for f in files if not f.is_directory)),
-                compressed_size=format_size(len(compressed_data)),
-                compression_ratio=f"{(1 - len(compressed_data) / max(1, sum(f.size for f in files if not f.is_directory))) * 100:.1f}%"
-            )
+            original_size = sum(f.size for f in files if not f.is_directory)
+            compression_ratio = (1 - len(compressed_data) / max(1, original_size)) * 100
+            
+            success("压缩完成", stage=LogStage.COMPRESS)
+            info(f"  算法: {actual_algorithm}")
+            info(f"  原始大小: {format_size(original_size)}")
+            info(f"  压缩大小: {format_size(len(compressed_data))}")
+            info(f"  压缩率: {compression_ratio:.1f}%")
             
             return compressed_data, actual_algorithm
             
         except CompressionError as e:
-            logger.error("压缩失败", error=str(e), traceback=traceback.format_exc())
+            error(f"压缩失败: {e}", stage=LogStage.COMPRESS)
             raise BuildError(f"压缩失败: {e}") from e
         except Exception as e:
-            logger.error("压缩过程异常", error=str(e), traceback=traceback.format_exc())
+            error(f"压缩过程异常: {e}", stage=LogStage.COMPRESS)
             raise BuildError(f"压缩过程异常: {e}") from e
     
     def _build_header(
@@ -255,8 +274,7 @@ class Builder:
         archive_hash: str
     ) -> bytes:
         """构建头部"""
-        logger = get_stage_logger(LogStage.HEADER)
-        logger.info("开始构建头部")
+        info("构建头部", stage=LogStage.HEADER)
         
         try:
             from ..config.schema import CompressionAlgorithm
@@ -270,18 +288,17 @@ class Builder:
             
             header_bytes = self.header_builder.serialize_header(header_data)
             
-            logger.info("头部构建完成", header_size=format_size(len(header_bytes)))
+            success(f"头部构建完成 - 大小: {format_size(len(header_bytes))}", stage=LogStage.HEADER)
             
             return header_bytes
             
         except Exception as e:
-            logger.error("头部构建失败", error=str(e), traceback=traceback.format_exc())
+            error(f"头部构建失败: {e}", stage=LogStage.HEADER)
             raise BuildError(f"头部构建失败: {e}") from e
     
     def _write_installer(self, header: bytes, compressed_data: bytes, output_path: Path, config: InspaConfig) -> None:
         """写入最终安装器文件"""
-        logger = get_stage_logger(LogStage.WRITE)
-        logger.info("开始写入安装器", output_path=str(output_path))
+        info(f"写入安装器: {output_path}", stage=LogStage.WRITE)
         
         try:
             # 确保输出目录存在
@@ -311,10 +328,10 @@ class Builder:
                 f.write(hash_bytes)
             
             file_size = output_path.stat().st_size
-            logger.info("安装器写入完成", file_size=format_size(file_size))
+            success(f"安装器写入完成 - 大小: {format_size(file_size)}", stage=LogStage.WRITE)
             
         except Exception as e:
-            logger.error("写入安装器失败", error=str(e), traceback=traceback.format_exc())
+            error(f"写入安装器失败: {e}", stage=LogStage.WRITE)
             raise BuildError(f"写入安装器失败: {e}") from e
     
     def _get_runtime_stub(self, config: InspaConfig) -> bytes:
@@ -322,8 +339,7 @@ class Builder:
         
         动态编译 runtime stub 或使用预编译版本
         """
-        logger = get_stage_logger(LogStage.STUB)
-        logger.info("获取 Runtime Stub")
+        info("获取Runtime Stub", stage=LogStage.STUB)
         need_custom = bool(getattr(config, 'resources', None) and config.resources and config.resources.icon)
         # 版本信息始终需要注入
         need_custom = True  # 直接强制动态编译以便写入版本信息和图标
@@ -333,20 +349,20 @@ class Builder:
             if not need_custom:
                 stub_path = Path(__file__).parent.parent / "runtime_stub" / "dist" / "stub.exe"
                 if stub_path.exists():
-                    logger.info("使用预编译的 Runtime Stub", stub_path=str(stub_path))
+                    info(f"使用预编译的Runtime Stub: {stub_path}", stage=LogStage.STUB)
                     stub_data = stub_path.read_bytes()
-                    logger.info("Runtime Stub 准备完成", stub_size=format_size(len(stub_data)))
+                    success(f"Runtime Stub准备完成 - 大小: {format_size(len(stub_data))}", stage=LogStage.STUB)
                     return stub_data
             
             # 如果没有预编译版本，动态编译
-            logger.info("预编译 stub 不存在，开始动态编译")
+            warning("预编译stub不存在，开始动态编译", stage=LogStage.STUB)
             stub_data = self._compile_runtime_stub(config)
-            logger.info("Runtime Stub 准备完成", stub_size=format_size(len(stub_data)))
+            success(f"Runtime Stub准备完成 - 大小: {format_size(len(stub_data))}", stage=LogStage.STUB)
             return stub_data
             
         except Exception as e:
-            logger.error("获取 Runtime Stub 失败", error=str(e))
-            logger.error("详细错误信息", traceback=traceback.format_exc())
+            error(f"获取Runtime Stub失败: {e}", stage=LogStage.STUB)
+            error(f"详细错误信息:\n{traceback.format_exc()}")
             raise BuildError(f"无法获取 Runtime Stub: {e}")
     
     def _compile_runtime_stub(self, config: InspaConfig) -> bytes:
@@ -354,8 +370,7 @@ class Builder:
         import subprocess
         import tempfile
         
-        logger = get_stage_logger(LogStage.STUB)
-        logger.info("开始编译 Runtime Stub")
+        info("开始编译Runtime Stub", stage=LogStage.STUB)
         
         # 获取 runtime_stub 目录
         runtime_stub_dir = Path(__file__).parent.parent / "runtime_stub"
@@ -374,7 +389,7 @@ class Builder:
                 cmd = [
                     "pyinstaller",
                     "--onefile",
-                    "--noconsole",
+                    "--console",  # 改为console模式以便看到输出
                     "--distpath", str(output_dir),
                     "--workpath", str(temp_path / "build"),
                     "--specpath", str(temp_path),
@@ -384,7 +399,7 @@ class Builder:
                 # 图标
                 if config.resources and config.resources.icon:
                     icon_path = str(config.resources.icon)
-                    logger.info(f"添加图标: {icon_path}")
+                    info(f"添加图标: {icon_path}", stage=LogStage.STUB)
                     cmd.extend(["--icon", icon_path])
 
                 # 版本文件生成
@@ -404,7 +419,7 @@ class Builder:
 
                 cmd.append(str(main_py))
                 
-                logger.info("执行编译命令", cmd=" ".join(cmd))
+                info("执行PyInstaller编译...", stage=LogStage.STUB)
                 result = subprocess.run(
                     cmd,
                     capture_output=True,
@@ -414,7 +429,9 @@ class Builder:
                 )
                 
                 if result.returncode != 0:
-                    logger.error("编译失败", stderr=result.stderr, stdout=result.stdout)
+                    error("编译失败", stage=LogStage.STUB)
+                    error(f"stderr: {result.stderr}")
+                    info(f"stdout: {result.stdout}")
                     raise BuildError(f"PyInstaller 编译失败: {result.stderr}")
                 
                 # 读取编译结果
@@ -423,7 +440,7 @@ class Builder:
                     raise BuildError("编译完成但未找到输出文件")
                 
                 stub_data = stub_exe.read_bytes()
-                logger.info("Runtime Stub 编译完成", size=format_size(len(stub_data)))
+                success(f"Runtime Stub编译完成 - 大小: {format_size(len(stub_data))}", stage=LogStage.STUB)
                 
                 return stub_data
                 
@@ -432,6 +449,108 @@ class Builder:
             except subprocess.CalledProcessError as e:
                 raise BuildError(f"编译过程出错: {e}")
             except Exception as e:
-                logger.error("编译过程异常", error=str(e))
-                logger.error("详细错误信息", traceback=traceback.format_exc())
+                error(f"编译过程异常: {e}", stage=LogStage.STUB)
+                error(f"详细错误信息:\n{traceback.format_exc()}")
                 raise BuildError(f"编译 Runtime Stub 失败: {e}")
+    
+    def _build_header(self, config: InspaConfig, files: list[FileInfo], compressed_data: bytes, actual_algorithm: str) -> bytes:
+        """构建头部数据"""
+        info("构建头部数据", stage=LogStage.HEADER)
+        
+        try:
+            # 计算哈希
+            archive_hash = HashCalculator.hash_data(compressed_data)
+            
+            # 构建头部
+            header_dict = self.header_builder.build_header(
+                config=config,
+                files=files,
+                compression_algo=actual_algorithm,
+                archive_hash=archive_hash
+            )
+            
+            # 序列化为JSON
+            header_json = self.header_builder.serialize_header(header_dict)
+            
+            return header_json.encode('utf-8')
+            
+        except Exception as e:
+            error(f"构建头部失败: {e}", stage=LogStage.HEADER)
+            raise BuildError(f"构建头部失败: {e}") from e
+    
+    def _assemble_installer(self, header_data: bytes, compressed_data: bytes, output_path: Path, progress_callback: Optional[ProgressCallback] = None) -> int:
+        """组装最终安装器"""
+        info(f"组装安装器: {output_path}", stage=LogStage.WRITE)
+        
+        try:
+            # 确保输出目录存在
+            ensure_directory(output_path.parent)
+            
+            if progress_callback:
+                progress_callback("组装文件", 10, 100, "生成 Runtime Stub...")
+            
+            # 生成 Runtime Stub
+            stub_data = self._generate_runtime_stub()
+            
+            if progress_callback:
+                progress_callback("组装文件", 50, 100, "写入最终文件...")
+            
+            # 创建最终文件
+            with open(output_path, 'wb') as f:
+                # 写入 stub
+                f.write(stub_data)
+                
+                # 写入头部长度 (8字节 little-endian)
+                header_len = len(header_data)
+                f.write(header_len.to_bytes(8, byteorder='little'))
+                
+                # 写入头部数据
+                f.write(header_data)
+                
+                # 写入压缩数据
+                f.write(compressed_data)
+                
+                # 写入尾部哈希校验
+                archive_hash = HashCalculator.hash_data(compressed_data)
+                f.write(bytes.fromhex(archive_hash))
+            
+            final_size = output_path.stat().st_size
+            
+            if progress_callback:
+                progress_callback("组装文件", 100, 100, f"完成，大小 {format_size(final_size)}")
+            
+            success(f"安装器组装完成 - 大小: {format_size(final_size)}", stage=LogStage.WRITE)
+            
+            return final_size
+            
+        except Exception as e:
+            error(f"组装安装器失败: {e}", stage=LogStage.WRITE)
+            raise BuildError(f"组装安装器失败: {e}") from e
+    
+    def _generate_runtime_stub(self) -> bytes:
+        """生成 Runtime Stub"""
+        # 这是一个简化的实现，实际需要调用 PyInstaller 或使用预编译的 stub
+        # 当前返回一个最小的占位 stub
+        
+        info("生成 Runtime Stub", stage=LogStage.STUB)
+        
+        # 创建一个最小的 Python 脚本作为 stub
+        stub_script = '''
+import sys
+import os
+from pathlib import Path
+
+def main():
+    print("Inspa Runtime Stub - 这是一个测试版本")
+    print("正在提取数据...")
+    # TODO: 实现实际的提取和安装逻辑
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())
+'''
+        
+        # 简单返回脚本内容（实际应该是编译后的可执行文件）
+        warning("使用测试 Runtime Stub - 生产环境需要实现完整的编译流程", stage=LogStage.STUB)
+        
+        return stub_script.encode('utf-8')

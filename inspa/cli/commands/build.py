@@ -34,11 +34,7 @@ def build_command(
         inspa build -c config.yaml -o installer.exe --icon app.ico
     """
     from ...build.builder import Builder
-    from ...utils import configure_logging
 
-    # 始终配置日志（RichHandler 可与 Progress 协同），避免进度条与日志同行
-    configure_logging(log_file=log_file, rich_console=console)
-    
     config_path = Path(config)
     output_path = Path(output)
     
@@ -50,7 +46,7 @@ def build_command(
     
     try:
         # 加载配置
-        console.print(f"正在加载配置文件: [cyan]{config_path}[/cyan]")
+        console.print(f"[cyan]正在加载配置文件[/cyan]: {config_path}")
         config_obj = load_config(config_path)
         
         # 如果指定了图标，更新配置
@@ -68,22 +64,17 @@ def build_command(
         # 创建构建器
         builder = Builder()
         
-        # 构建进度回调
-        def progress_callback(stage: str, current: int, total: int, message: str = "") -> None:
-            # 这里可以更新进度显示
-            pass
-        
         # 开始构建
-        console.print("开始构建安装器...")
+        console.print("[cyan]开始构建安装器...[/cyan]")
         
         def progress_callback(stage: str, current: int, total: int, message: str = "") -> None:
-            """进度回调函数，使用日志显示进度"""
+            """进度回调函数，显示进度"""
             if total > 0:
                 percentage = (current / total) * 100
                 if message:
-                    console.print(f"[cyan]{stage}[/cyan]: {message} ({percentage:.0f}%)")
+                    console.print(f"[blue]{stage}[/blue]: {message} ({percentage:.0f}%)")
                 else:
-                    console.print(f"[cyan]{stage}[/cyan]: {percentage:.0f}%")
+                    console.print(f"[blue]{stage}[/blue]: {percentage:.0f}%")
         
         try:
             builder.build(
@@ -93,28 +84,28 @@ def build_command(
             )
                 
             # 构建成功消息
-            console.print(f"✓ 安装器构建完成: [green]{output_path}[/green]")
+            console.print(f"[green]✓ 安装器构建完成[/green]: {output_path}")
             
             # 显示统计信息
             if output_path.exists():
                 size_mb = output_path.stat().st_size / (1024 * 1024)
-                console.print(f"文件大小: {size_mb:.1f} MB")
+                console.print(f"[blue]文件大小[/blue]: {size_mb:.1f} MB")
             
         except Exception as e:
-            console.print(f"[red]构建失败: {e}[/red]")
-            console.print("[yellow]详细错误信息:[/yellow]")
-            console.print(traceback.format_exc())
+            console.print(f"[red]✗ 构建失败[/red]: {e}")
+            if log_file:  # 只有指定了日志文件才显示详细信息
+                console.print(f"[yellow]详细错误信息:[/yellow]\n{traceback.format_exc()}")
             raise typer.Exit(1)
                 
     except ConfigError as e:
-        console.print(f"[red]配置错误: {e}[/red]")
+        console.print(f"[red]配置错误[/red]: {e}")
         raise typer.Exit(1)
     except ConfigValidationError as e:
-        console.print(f"[red]配置验证失败:[/red]")
+        console.print("[red]配置验证失败:[/red]")
         console.print(e.format_errors())
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]构建失败: {e}[/red]")
-        console.print("[yellow]详细错误信息:[/yellow]")
-        console.print(traceback.format_exc())
+        console.print(f"[red]构建失败[/red]: {e}")
+        if log_file:
+            console.print(f"[yellow]详细错误信息:[/yellow]\n{traceback.format_exc()}")
         raise typer.Exit(1)
