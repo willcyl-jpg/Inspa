@@ -1,4 +1,4 @@
-# InstaPro 需求说明书（最终版）
+# Inspa 需求说明书（最终版）
 
 版本：1.0  
 状态：正式版 (Final)  
@@ -10,7 +10,7 @@
 
 ## 1. 概述
 
-InstaPro 是一个面向 Windows 平台的 **单文件自解压安装器（Self-Extracting Installer）构建与运行系统**。  
+Inspa 是一个面向 Windows 平台的 **单文件自解压安装器（Self-Extracting Installer）构建与运行系统**。  
 由两大部分组成：  
 1. **构建端（Builder：CLI + GUI）**：读取 YAML 配置、管理文件与脚本、设定版本与显示信息、压缩并生成最终安装器 EXE。  
 2. **运行端（Runtime Stub / 安装器）**：为最终用户提供安装界面（GitHub Light 风格 + 高 DPI 支持）、协议展示、路径选择、文件解压与脚本执行。
@@ -329,7 +329,7 @@ resources:
   icon: "./icons/app.ico"  # 可选
 
 ui:
-  window_title: "InstaPro 安装程序"
+  window_title: "Inspa 安装程序"
   welcome_heading: "欢迎使用 DemoApp 安装向导"
   welcome_subtitle: "快速、可靠、简洁的安装体验"
   theme: "github-light"  # 固定
