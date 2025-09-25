@@ -123,6 +123,9 @@ class ConfigLoader:
         # 解析相对路径（相对于配置文件所在目录）
         self._resolve_relative_paths(raw_data, config_path.parent)
         
+        # 应用兼容性修复
+        self._apply_compatibility_fixes(raw_data)
+        
         # 使用 Pydantic 验证
         try:
             config = InspaConfig.from_dict(raw_data)
@@ -208,6 +211,31 @@ class ConfigLoader:
                 'msg': str(e),
                 'type': 'config_error'
             }]
+
+    def _apply_compatibility_fixes(self, data: Dict[str, Any]) -> None:
+        """应用兼容性修复，处理旧版本配置文件格式
+        
+        Args:
+            data: 配置数据字典（原地修改）
+        """
+        # 修复：将 install.icon_path 移动到 resources.icon
+        if 'install' in data and isinstance(data['install'], dict):
+            install_section = data['install']
+            
+            if 'icon_path' in install_section:
+                icon_path = install_section.pop('icon_path')
+                
+                # 确保 resources 部分存在
+                if 'resources' not in data:
+                    data['resources'] = {}
+                elif not isinstance(data['resources'], dict):
+                    data['resources'] = {}
+                
+                # 移动 icon_path 到 resources.icon
+                data['resources']['icon'] = icon_path
+        
+        # 可以在这里添加其他兼容性修复
+        # 例如：处理旧的字段名称、默认值变更等
 
     def _resolve_relative_paths(self, data: Dict[str, Any], base_path: Path) -> None:
         """解析配置中的相对路径

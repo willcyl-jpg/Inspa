@@ -10,6 +10,7 @@ from .loader import (
     ConfigError,
     load_config, 
     validate_config, 
+    validate_config_with_result,
     save_config,
     config_loader
 )
@@ -25,7 +26,8 @@ __all__ = [
     
     # 便捷函数
     "load_config", 
-    "validate_config", 
+    "validate_config",
+    "validate_config_with_result", 
     "save_config",
     
     # 单例

@@ -20,13 +20,22 @@ def gui_command() -> None:
     try:
         console.print("正在启动图形界面...")
         
-        # TODO: 实现实际的 GUI 启动逻辑
-        from ...gui.main import launch_gui
-        launch_gui()
+        # 导入并检查 GUI 可用性
+        from ...gui import GUI_AVAILABLE, BuilderGUI
         
-    except ImportError:
+        if not GUI_AVAILABLE:
+            console.print("[red]GUI 依赖未安装或不可用[/red]")
+            console.print("请安装 CustomTkinter: pip install customtkinter")
+            raise typer.Exit(1)
+        
+        # 启动 Builder GUI
+        app = BuilderGUI()
+        app.run()
+        
+    except ImportError as e:
         console.print("[red]GUI 依赖未安装或不可用[/red]")
         console.print("请安装 CustomTkinter: pip install customtkinter")
+        console.print(f"详细错误: {e}")
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]启动 GUI 失败: {e}[/red]")

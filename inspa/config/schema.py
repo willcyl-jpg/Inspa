@@ -46,12 +46,24 @@ class ProductModel(BaseModel):
     @field_validator('version')
     @classmethod
     def validate_version(cls, v: str) -> str:
-        """验证版本号格式"""
+        """验证版本号格式 - 支持更灵活的格式"""
         import re
-        # 支持语义化版本号格式，如 1.0.0, 1.2.3-beta.1
-        pattern = r'^\d+\.\d+\.\d+(?:-[\w\-\.]+)?$'
-        if not re.match(pattern, v):
-            raise ValueError("版本号必须符合语义化版本格式，如 1.0.0")
+        # 支持多种版本号格式：
+        # - 语义化版本：1.0.0, 1.2.3-beta.1  
+        # - 简单格式：1.0, 1.2.3.4, 25.9.25
+        # - 日期格式：2025.01.01, 25.9.25
+        patterns = [
+            r'^\d+\.\d+\.\d+(?:-[\w\-\.]+)?$',  # 标准 SemVer
+            r'^\d+\.\d+$',                      # 简单两段式
+            r'^\d+\.\d+\.\d+\.\d+$',           # 四段式
+            r'^\d{2,4}\.\d{1,2}\.\d{1,2}$',    # 日期格式
+        ]
+        
+        for pattern in patterns:
+            if re.match(pattern, v):
+                return v
+        
+        raise ValueError("版本号格式不正确，支持格式：1.0.0（SemVer）、1.0、25.9.25（日期格式）等")
         return v
 
 

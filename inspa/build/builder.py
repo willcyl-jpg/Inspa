@@ -85,121 +85,146 @@ class Builder:
             output_path: 输出文件路径
             progress_callback: 进度回调函数
             
+        Returns:
+            BuildResult: 构建结果
+            
         Raises:
             BuildError: 构建失败
         """
         self.build_stats['start_time'] = time.time()
         
         try:
-            info(f"开始构建安装器: {output_path}", stage=LogStage.INIT)
+            info(f"开始构建安装器: {output_path}", stage=LogStage.BUILD)
             
-            # 步骤 1: 收集文件
+            # 步骤 1: 收集文件 (0%-20%)
             if progress_callback:
                 progress_callback("收集文件", 0, 100, "扫描输入目录...")
             
-            files = self._collect_files(config)
+            files = self._collect_files(config, progress_callback)
             
             if progress_callback:
-                progress_callback("收集文件", 100, 100, f"收集完成，找到 {len(files)} 个文件")
+                progress_callback("收集文件", 20, 100, f"找到 {len(files)} 个文件")
             
-            # 步骤 2: 压缩文件
+            # 步骤 2: 压缩文件 (20%-60%)  
             if progress_callback:
-                progress_callback("压缩文件", 0, 100, "初始化压缩器...")
+                progress_callback("压缩文件", 20, 100, "开始压缩...")
             
             compressed_data, actual_algorithm = self._compress_files(config, files, progress_callback)
             
             if progress_callback:
-                progress_callback("压缩文件", 100, 100, f"压缩完成，大小 {format_size(len(compressed_data))}")
+                progress_callback("压缩文件", 60, 100, f"压缩完成，大小: {format_size(len(compressed_data))}")
             
-            # 步骤 3: 计算哈希
+            # 步骤 3: 构建头部 (60%-70%)
             if progress_callback:
-                progress_callback("计算哈希", 0, 100, "计算完整性哈希...")
+                progress_callback("构建头部", 60, 100, "生成安装器头部...")
             
-            archive_hash = HashCalculator.hash_data(compressed_data)
-            
-            if progress_callback:
-                progress_callback("计算哈希", 100, 100, f"哈希计算完成")
-            
-            # 步骤 4: 构建头部
-            if progress_callback:
-                progress_callback("构建头部", 0, 100, "生成头部信息...")
-            
-            header = self._build_header(config, files, actual_algorithm, archive_hash)
+            header_data = self._build_header_data(config, files, compressed_data, actual_algorithm)
             
             if progress_callback:
-                progress_callback("构建头部", 100, 100, "头部信息构建完成")
+                progress_callback("构建头部", 70, 100, "头部数据生成完成")
             
-            # 步骤 5: 写入最终文件
+            # 步骤 4: 组装安装器 (70%-100%)
             if progress_callback:
-                progress_callback("生成安装器", 0, 100, "写入安装器文件...")
+                progress_callback("组装安装器", 70, 100, "生成最终安装器...")
             
-            self._write_installer(header, compressed_data, output_path, config)
+            final_size = self._assemble_installer(header_data, compressed_data, output_path, progress_callback)
             
-            if progress_callback:
-                progress_callback("生成安装器", 100, 100, "安装器写入完成")
-            
-            if progress_callback:
-                progress_callback("完成", 100, 100, "构建成功完成")
-            
-            # 更新统计信息
+            # 计算统计信息
             self.build_stats['end_time'] = time.time()
-            self.build_stats['total_files'] = len([f for f in files if not f.is_directory])
-            self.build_stats['total_size'] = sum(f.size for f in files if not f.is_directory)
-            self.build_stats['compressed_size'] = len(compressed_data)
-            
-            if self.build_stats['total_size'] > 0:
-                self.build_stats['compression_ratio'] = (
-                    1.0 - self.build_stats['compressed_size'] / self.build_stats['total_size']
-                ) * 100
-            
-            success("构建完成", stage=LogStage.DONE)
-            info(f"  构建时间: {self.build_stats['end_time'] - self.build_stats['start_time']:.2f}s")
-            info(f"  文件总数: {self.build_stats['total_files']}")
-            info(f"  原始大小: {format_size(self.build_stats['total_size'])}")
-            info(f"  压缩大小: {format_size(self.build_stats['compressed_size'])}")
-            info(f"  压缩率: {self.build_stats['compression_ratio']:.1f}%")
-            
-            # 返回构建结果
-            final_size = output_path.stat().st_size
             build_time = self.build_stats['end_time'] - self.build_stats['start_time']
             
-            return BuildResult(
+            original_size = sum(f.size for f in files if not f.is_directory)
+            compression_ratio = (1 - len(compressed_data) / max(1, original_size)) * 100
+            
+            # 构建成功
+            result = BuildResult(
                 success=True,
                 output_path=output_path,
                 output_size=final_size,
                 build_time=build_time,
-                compression_ratio=self.build_stats['compression_ratio'] / 100.0  # 转换为比例
+                compression_ratio=compression_ratio
             )
+            
+            success(f"安装器构建成功: {output_path}", stage=LogStage.BUILD)
+            info(f"构建时间: {build_time:.1f}秒")
+            info(f"最终大小: {format_size(final_size)}")
+            info(f"压缩率: {compression_ratio:.1f}%")
+            
+            return result
             
         except Exception as e:
             self.build_stats['end_time'] = time.time()
-            error(f"构建失败: {e}", stage=LogStage.ERROR)
-            error(f"详细错误信息:\n{traceback.format_exc()}")
+            build_time = self.build_stats['end_time'] - self.build_stats['start_time']
             
             error_msg = str(e)
-            if isinstance(e, BuildError):
-                return BuildResult(success=False, error=error_msg)
+            error(f"构建失败: {error_msg}", stage=LogStage.BUILD)
             
-            return BuildResult(success=False, error=f"构建失败: {error_msg}")
+            return BuildResult(
+                success=False,
+                build_time=build_time,
+                error=error_msg
+            )
     
     def get_build_stats(self) -> dict:
         """获取构建统计信息"""
         return self.build_stats.copy()
-    
-    def _collect_files(self, config: InspaConfig) -> list[FileInfo]:
-        """收集文件"""
-        info(f"收集文件 - 输入源: {len(config.inputs)}", stage=LogStage.COLLECT)
+    def _collect_files(
+        self, 
+        config: InspaConfig, 
+        progress_callback: Optional[ProgressCallback] = None
+    ) -> list[FileInfo]:
+        """收集要打包的文件"""
+        info("收集文件", stage=LogStage.COLLECT)
         
         try:
-            files = self.collector.collect_files(config.inputs, config.exclude)
+            all_files = []
             
-            stats = self.collector.get_statistics()
-            success("文件收集完成", stage=LogStage.COLLECT)
-            info(f"  收集文件: {stats.get('files_collected', 0)}")
-            info(f"  跳过文件: {stats.get('files_skipped', 0)}")
-            info(f"  总大小: {format_size(stats.get('total_size', 0))}")
+            # 遍历所有输入路径
+            for i, input_path in enumerate(config.inputs):
+                if progress_callback:
+                    progress_callback("收集文件", int((i / len(config.inputs)) * 20), 100, f"扫描: {input_path.path}")
+                
+                source_path = Path(input_path.path)
+                
+                if not source_path.exists():
+                    warning(f"输入路径不存在: {source_path}", stage=LogStage.COLLECT)
+                    continue
+                
+                # 创建文件收集器
+                collector = FileCollector(
+                    base_path=source_path.parent,
+                    exclude_patterns=config.exclude or []
+                )
+                
+                # 收集文件
+                if source_path.is_file():
+                    # 单个文件
+                    stat = source_path.stat()
+                    file_info = FileInfo(
+                        path=source_path.resolve(),
+                        relative_path=Path(input_path.target or source_path.name),
+                        size=stat.st_size,
+                        mtime=stat.st_mtime,
+                        is_directory=False
+                    )
+                    all_files.append(file_info)
+                else:
+                    # 目录
+                    dir_files = collector.collect_files([input_path])
+                    all_files.extend(dir_files)
             
-            return files
+            # 统计信息
+            total_files = len([f for f in all_files if not f.is_directory])
+            total_size = sum(f.size for f in all_files if not f.is_directory)
+            
+            self.build_stats['total_files'] = total_files
+            self.build_stats['total_size'] = total_size
+            
+            success(f"文件收集完成", stage=LogStage.COLLECT)
+            info(f"  文件数量: {total_files}")
+            info(f"  总大小: {format_size(total_size)}")
+            
+            return all_files
             
         except Exception as e:
             error(f"文件收集失败: {e}", stage=LogStage.COLLECT)
@@ -265,6 +290,43 @@ class Builder:
         except Exception as e:
             error(f"压缩过程异常: {e}", stage=LogStage.COMPRESS)
             raise BuildError(f"压缩过程异常: {e}") from e
+    
+    def _build_header_data(
+        self, 
+        config: InspaConfig, 
+        files: list[FileInfo], 
+        compressed_data: bytes, 
+        actual_algorithm: str
+    ) -> bytes:
+        """构建头部数据"""
+        info("构建头部数据", stage=LogStage.HEADER)
+        
+        try:
+            # 计算压缩数据哈希
+            archive_hash = HashCalculator.hash_data(compressed_data)
+            
+            from ..config.schema import CompressionAlgorithm
+            compression_enum = CompressionAlgorithm(actual_algorithm)
+            
+            # 构建头部
+            header_dict = self.header_builder.build_header(
+                config=config,
+                files=files,
+                compression_algo=compression_enum,
+                archive_hash=archive_hash
+            )
+            
+            # 序列化为JSON
+            header_json = self.header_builder.serialize_header(header_dict)
+            header_bytes = header_json.encode('utf-8')
+            
+            success(f"头部数据构建完成 - 大小: {format_size(len(header_bytes))}", stage=LogStage.HEADER)
+            
+            return header_bytes
+            
+        except Exception as e:
+            error(f"构建头部失败: {e}", stage=LogStage.HEADER)
+            raise BuildError(f"构建头部失败: {e}") from e
     
     def _build_header(
         self, 
@@ -453,32 +515,13 @@ class Builder:
                 error(f"详细错误信息:\n{traceback.format_exc()}")
                 raise BuildError(f"编译 Runtime Stub 失败: {e}")
     
-    def _build_header(self, config: InspaConfig, files: list[FileInfo], compressed_data: bytes, actual_algorithm: str) -> bytes:
-        """构建头部数据"""
-        info("构建头部数据", stage=LogStage.HEADER)
-        
-        try:
-            # 计算哈希
-            archive_hash = HashCalculator.hash_data(compressed_data)
-            
-            # 构建头部
-            header_dict = self.header_builder.build_header(
-                config=config,
-                files=files,
-                compression_algo=actual_algorithm,
-                archive_hash=archive_hash
-            )
-            
-            # 序列化为JSON
-            header_json = self.header_builder.serialize_header(header_dict)
-            
-            return header_json.encode('utf-8')
-            
-        except Exception as e:
-            error(f"构建头部失败: {e}", stage=LogStage.HEADER)
-            raise BuildError(f"构建头部失败: {e}") from e
-    
-    def _assemble_installer(self, header_data: bytes, compressed_data: bytes, output_path: Path, progress_callback: Optional[ProgressCallback] = None) -> int:
+    def _assemble_installer(
+        self, 
+        header_data: bytes, 
+        compressed_data: bytes, 
+        output_path: Path, 
+        progress_callback: Optional[ProgressCallback] = None
+    ) -> int:
         """组装最终安装器"""
         info(f"组装安装器: {output_path}", stage=LogStage.WRITE)
         
@@ -487,13 +530,13 @@ class Builder:
             ensure_directory(output_path.parent)
             
             if progress_callback:
-                progress_callback("组装文件", 10, 100, "生成 Runtime Stub...")
+                progress_callback("组装文件", 70, 100, "生成 Runtime Stub...")
             
-            # 生成 Runtime Stub
+            # 生成 Runtime Stub - 暂时使用临时实现
             stub_data = self._generate_runtime_stub()
             
             if progress_callback:
-                progress_callback("组装文件", 50, 100, "写入最终文件...")
+                progress_callback("组装文件", 85, 100, "写入最终文件...")
             
             # 创建最终文件
             with open(output_path, 'wb') as f:
@@ -528,29 +571,36 @@ class Builder:
             raise BuildError(f"组装安装器失败: {e}") from e
     
     def _generate_runtime_stub(self) -> bytes:
-        """生成 Runtime Stub"""
-        # 这是一个简化的实现，实际需要调用 PyInstaller 或使用预编译的 stub
-        # 当前返回一个最小的占位 stub
+        """生成 Runtime Stub
         
+        优先使用预编译的 stub，如果不存在则使用临时实现
+        """
         info("生成 Runtime Stub", stage=LogStage.STUB)
         
-        # 创建一个最小的 Python 脚本作为 stub
-        stub_script = '''
+        # 查找预编译的 stub
+        stub_path = Path(__file__).parent.parent / "runtime_stub" / "dist" / "stub.exe"
+        
+        if stub_path.exists():
+            info(f"使用预编译的 Runtime Stub: {stub_path}", stage=LogStage.STUB)
+            stub_data = stub_path.read_bytes()
+            success(f"Runtime Stub 准备完成 - 大小: {format_size(len(stub_data))}", stage=LogStage.STUB)
+            return stub_data
+        
+        # 如果没有预编译版本，创建一个最小的 Python 可执行文件
+        warning("预编译 stub 不存在，使用临时实现", stage=LogStage.STUB)
+        
+        # 返回一个临时的文本作为占位
+        # 实际生产中这里应该调用 PyInstaller 编译 standalone_main.py
+        stub_content = b"""
+# Inspa Runtime Stub Placeholder
+# This is a temporary implementation
+# In production, this should be a compiled executable from standalone_main.py
+
 import sys
-import os
-from pathlib import Path
-
-def main():
-    print("Inspa Runtime Stub - 这是一个测试版本")
-    print("正在提取数据...")
-    # TODO: 实现实际的提取和安装逻辑
-    return 0
-
-if __name__ == "__main__":
-    sys.exit(main())
-'''
+print("Inspa Installer - Temporary stub")
+print("This installer is built with a development stub")
+sys.exit(0)
+"""
         
-        # 简单返回脚本内容（实际应该是编译后的可执行文件）
-        warning("使用测试 Runtime Stub - 生产环境需要实现完整的编译流程", stage=LogStage.STUB)
-        
-        return stub_script.encode('utf-8')
+        success(f"临时 Runtime Stub 准备完成 - 大小: {format_size(len(stub_content))}", stage=LogStage.STUB)
+        return stub_content
