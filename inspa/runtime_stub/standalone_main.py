@@ -17,7 +17,7 @@ import zipfile
 import io
 import struct
 from pathlib import Path
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, Callable
 
 # GUI支持 - 可选依赖 (避免静态检查未绑定告警)
 try:  # pragma: no cover - GUI 运行时特性
@@ -223,8 +223,14 @@ class InstallerRuntime:
                     return Path(os.path.expandvars(default_path))
         return Path.cwd() / "installed_app"
     
-    def _extract_files(self, install_dir: Path, silent: bool = False) -> None:
-        """解压文件 (ZIP / ZSTD)"""
+    def _extract_files(self, install_dir: Path, silent: bool = False, file_callback: Optional[Callable[[str], None]] = None) -> None:
+        """解压文件 (ZIP / ZSTD)
+
+        Args:
+            install_dir: 安装目录
+            silent: 是否静默
+            file_callback: 每解压一个文件时回调(relative_path)
+        """
         if not self.compressed_data:
             raise RuntimeError("没有压缩数据可解压")
         algo = 'zip'
@@ -260,6 +266,11 @@ class InstallerRuntime:
                     if len(path_bytes) != path_len:
                         break
                     rel_path = path_bytes.decode('utf-8')
+                    if file_callback:
+                        try:
+                            file_callback(rel_path)
+                        except Exception:
+                            pass
                     meta = reader.read(17)
                     if len(meta) != 17:
                         break
@@ -289,7 +300,13 @@ class InstallerRuntime:
         else:
             # ZIP
             with zipfile.ZipFile(io.BytesIO(self.compressed_data), 'r') as zf:
-                zf.extractall(install_dir)
+                for info in zf.infolist():
+                    zf.extract(info, install_dir)
+                    if not info.is_dir() and file_callback:
+                        try:
+                            file_callback(info.filename)
+                        except Exception:
+                            pass
         if not silent:
             print(f"文件解压完成到: {install_dir}")
     
@@ -332,7 +349,8 @@ class InstallerRuntime:
             self._parse_installer()
             
             if not self.header_data:
-                messagebox.showerror("错误", "无法解析安装器文件")
+                if GUI_AVAILABLE and messagebox:
+                    messagebox.showerror("错误", "无法解析安装器文件")
                 return False
             
             # 获取应用名称和默认路径
@@ -386,17 +404,32 @@ class InstallerRuntime:
             return result_path is not None
             
         except Exception as e:
-            if GUI_AVAILABLE:
+            if GUI_AVAILABLE and messagebox:
                 messagebox.showerror("安装错误", f"安装过程中发生错误: {e}")
             return False
 
 
 class SimpleInstallerGUI:
-    """简化的安装器GUI界面"""
+    """安装器 GUI (多阶段 + 主题美化)
+
+    特性：
+    - 欢迎页（标题、副标题）
+    - 许可协议（可选）
+    - 路径选择
+    - 安装进度
+    - 完成页（打开目录按钮）
+    - 渐变背景 + 浅色主体 + 蓝/橙强调色
+    """
     
-    def __init__(self, app_name: str = "应用程序", default_path: Optional[str] = None):
+    def __init__(self, app_name: str = "应用程序", default_path: Optional[str] = None,
+                 welcome_heading: Optional[str] = None,
+                 welcome_subtitle: Optional[str] = None,
+                 license_file: Optional[str] = None):
         self.app_name = app_name
         self.default_path = default_path or f"C:\\Program Files\\{app_name}"
+        self.welcome_heading = welcome_heading or f"欢迎安装 {app_name}"
+        self.welcome_subtitle = welcome_subtitle or ""
+        self.license_file = license_file if license_file and Path(license_file).exists() else None
         self.cancelled = False
         self.selected_path = None
         self.install_callback = None
@@ -418,10 +451,11 @@ class SimpleInstallerGUI:
         
         # 变量
         self.install_path = ctk.StringVar(value=self.default_path)  # type: ignore
-        self.state = "directory"  # directory, installing, completed
-        
+        self.state = "welcome"  # welcome, license, directory, installing, completed
+
         # 构建界面
         self._build_ui()
+        self._show_welcome()
         
         # 绑定关闭事件
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
@@ -475,16 +509,79 @@ class SimpleInstallerGUI:
         )
         self.cancel_button.pack(side="right", padx=(0, 10))
         
-        # 显示目录选择界面
-        self._show_directory_selection()
+    # 内容区初始留空，后续由各阶段方法填充
     
+    def _clear_content(self):
+        for widget in self.content_frame.winfo_children():
+            widget.destroy()
+
+    def _primary_button(self, *args, **kwargs):  # 工厂方法：主色按钮
+        kwargs.setdefault('fg_color', '#1E6AD6')
+        kwargs.setdefault('hover_color', '#1554A6')
+        return ctk.CTkButton(*args, **kwargs)  # type: ignore
+
+    def _secondary_button(self, *args, **kwargs):  # 橙色强调
+        kwargs.setdefault('fg_color', '#FF8A34')
+        kwargs.setdefault('hover_color', '#D96A18')
+        return ctk.CTkButton(*args, **kwargs)  # type: ignore
+
+    def _show_welcome(self):
+        self.state = 'welcome'
+        self._clear_content()
+        wrap = ctk.CTkFrame(self.content_frame)  # type: ignore
+        wrap.pack(fill='both', expand=True, padx=10, pady=15)
+        heading = ctk.CTkLabel(wrap, text=self.welcome_heading, font=("Segoe UI", 18, "bold"))  # type: ignore
+        heading.pack(pady=(15, 10))
+        if self.welcome_subtitle:
+            sub = ctk.CTkLabel(wrap, text=self.welcome_subtitle, font=("Segoe UI", 12), wraplength=420, justify='center')  # type: ignore
+            sub.pack(pady=(0, 25))
+        actions = ctk.CTkFrame(wrap, fg_color='transparent')  # type: ignore
+        actions.pack(pady=10)
+        next_btn = self._primary_button(actions, text="下一步", width=120, command=self._maybe_license_or_directory)
+        next_btn.pack(side='left', padx=5)
+        cancel_btn = self._secondary_button(actions, text="取消", width=100, command=self._on_closing)
+        cancel_btn.pack(side='left', padx=5)
+
+    def _maybe_license_or_directory(self):
+        if self.license_file:
+            self._show_license()
+        else:
+            self._show_directory_selection()
+
+    def _show_license(self):
+        self.state = 'license'
+        self._clear_content()
+        frame = ctk.CTkFrame(self.content_frame)  # type: ignore
+        frame.pack(fill='both', expand=True, padx=5, pady=5)
+        title = ctk.CTkLabel(frame, text='许可协议', font=("Segoe UI", 16, 'bold'))  # type: ignore
+        title.pack(pady=(10, 5))
+        text_box = ctk.CTkTextbox(frame, width=430, height=180, font=("Consolas", 11))  # type: ignore
+        text_box.pack(padx=10, pady=5)
+        try:
+            raw = Path(self.license_file).read_text(encoding='utf-8')  # type: ignore[arg-type]
+        except Exception:
+            try:
+                raw = Path(self.license_file).read_text(encoding='gbk')  # type: ignore[arg-type]
+            except Exception:
+                raw = '无法读取许可文件'
+        text_box.insert('1.0', raw)
+        text_box.configure(state='disabled')
+        agree_var = ctk.BooleanVar(value=True)  # type: ignore
+        agree = ctk.CTkCheckBox(frame, text='我已阅读并同意', variable=agree_var)  # type: ignore
+        agree.pack(pady=(5, 5))
+        btns = ctk.CTkFrame(frame, fg_color='transparent')  # type: ignore
+        btns.pack(pady=10)
+        def to_next():
+            if agree_var.get():
+                self._show_directory_selection()
+        self._primary_button(btns, text='同意并继续', width=140, command=to_next).pack(side='left', padx=6)
+        self._secondary_button(btns, text='取消', width=100, command=self._on_closing).pack(side='left', padx=6)
+
     def _show_directory_selection(self):
         """显示目录选择界面"""
         self.state = "directory"
         
-        # 清除内容区域
-        for widget in self.content_frame.winfo_children():
-            widget.destroy()
+        self._clear_content()
         
         # 说明文字
         desc_label = ctk.CTkLabel(  # type: ignore
@@ -506,7 +603,7 @@ class SimpleInstallerGUI:
         )
         self.path_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
         
-        browse_button = ctk.CTkButton(  # type: ignore
+        browse_button = self._secondary_button(
             path_frame,
             text="浏览...",
             font=("Segoe UI", 11),
@@ -517,8 +614,8 @@ class SimpleInstallerGUI:
         browse_button.pack(side="right")
         
         # 更新按钮状态
-        self.install_button.configure(state="normal", text="安装")
-        self.cancel_button.configure(state="normal")
+        self.install_button.configure(state="normal", text="开始安装", command=self._start_installation)
+        self.cancel_button.configure(state="normal", text="上一步", command=self._show_welcome)
     
     def _show_installation_progress(self):
         """显示安装进度界面"""
@@ -567,63 +664,51 @@ class SimpleInstallerGUI:
             widget.destroy()
         
         if success:
-            # 成功图标
-            success_label = ctk.CTkLabel(
-                self.content_frame,
-                text="✓",
-                font=("Segoe UI", 36, "bold"),
-                text_color="green"
-            )
-            success_label.pack(pady=(20, 15))
-            
-            # 完成标题
-            title_label = ctk.CTkLabel(
-                self.content_frame,
-                text="安装完成",
-                font=("Segoe UI", 16, "bold")
-            )
-            title_label.pack(pady=(0, 15))
-            
-            # 完成消息
-            message_text = f"{self.app_name} 已成功安装到:\n{self.install_path.get()}"
-            message_label = ctk.CTkLabel(
-                self.content_frame,
-                text=message_text,
-                font=("Segoe UI", 11),
-                justify="center"
-            )
-            message_label.pack(pady=(0, 20))
-            
-            # 更新按钮
+            if GUI_AVAILABLE and ctk:
+                success_label = ctk.CTkLabel(  # type: ignore
+                    self.content_frame,
+                    text="✓",
+                    font=("Segoe UI", 36, "bold"),
+                    text_color="green"
+                )
+                success_label.pack(pady=(20, 15))
+                title_label = ctk.CTkLabel(  # type: ignore
+                    self.content_frame,
+                    text="安装完成",
+                    font=("Segoe UI", 16, "bold")
+                )
+                title_label.pack(pady=(0, 15))
+                message_text = f"{self.app_name} 已成功安装到:\n{self.install_path.get()}"
+                message_label = ctk.CTkLabel(  # type: ignore
+                    self.content_frame,
+                    text=message_text,
+                    font=("Segoe UI", 11),
+                    justify="center"
+                )
+                message_label.pack(pady=(0, 20))
             self.install_button.configure(text="完成", command=self._finish)
         else:
-            # 错误图标
-            error_label = ctk.CTkLabel(
-                self.content_frame,
-                text="✗",
-                font=("Segoe UI", 36, "bold"),
-                text_color="red"
-            )
-            error_label.pack(pady=(20, 15))
-            
-            # 错误标题
-            title_label = ctk.CTkLabel(
-                self.content_frame,
-                text="安装失败",
-                font=("Segoe UI", 16, "bold"),
-                text_color="red"
-            )
-            title_label.pack(pady=(0, 15))
-            
-            # 错误消息
-            message_label = ctk.CTkLabel(
-                self.content_frame,
-                text=message or "安装过程中发生错误",
-                font=("Segoe UI", 11)
-            )
-            message_label.pack(pady=(0, 20))
-            
-            # 更新按钮
+            if GUI_AVAILABLE and ctk:
+                error_label = ctk.CTkLabel(  # type: ignore
+                    self.content_frame,
+                    text="✗",
+                    font=("Segoe UI", 36, "bold"),
+                    text_color="red"
+                )
+                error_label.pack(pady=(20, 15))
+                title_label = ctk.CTkLabel(  # type: ignore
+                    self.content_frame,
+                    text="安装失败",
+                    font=("Segoe UI", 16, "bold"),
+                    text_color="red"
+                )
+                title_label.pack(pady=(0, 15))
+                message_label = ctk.CTkLabel(  # type: ignore
+                    self.content_frame,
+                    text=message or "安装过程中发生错误",
+                    font=("Segoe UI", 11)
+                )
+                message_label.pack(pady=(0, 20))
             self.install_button.configure(text="重试", command=self._show_directory_selection)
         
         # 重新启用按钮
@@ -632,10 +717,12 @@ class SimpleInstallerGUI:
     
     def _browse_directory(self):
         """浏览目录"""
-        directory = filedialog.askdirectory(
-            title="选择安装目录",
-            initialdir=self.install_path.get()
-        )
+        directory = None
+        if GUI_AVAILABLE and filedialog:
+            directory = filedialog.askdirectory(
+                title="选择安装目录",
+                initialdir=self.install_path.get()
+            )
         if directory:
             self.install_path.set(directory)
     
@@ -644,20 +731,26 @@ class SimpleInstallerGUI:
         # 验证路径
         path = self.install_path.get().strip()
         if not path:
-            messagebox.showerror("错误", "请选择安装目录")
+            if GUI_AVAILABLE and messagebox:
+                messagebox.showerror("错误", "请选择安装目录")
             return
         
         self.selected_path = path
         self._show_installation_progress()
         
         # 如果有安装回调，调用它
-        if self.install_callback:
+        if self.install_callback and callable(self.install_callback):
             import threading
-            def install_thread():
-                self.install_callback(path)
-            
-            thread = threading.Thread(target=install_thread)
-            thread.daemon = True
+            def install_thread():  # noqa: D401
+                try:
+                    self.install_callback(path)  # type: ignore[call-arg]
+                except Exception:
+                    if GUI_AVAILABLE and messagebox:
+                        try:
+                            messagebox.showerror("错误", "安装回调执行失败")
+                        except Exception:
+                            pass
+            thread = threading.Thread(target=install_thread, daemon=True)
             thread.start()
     
     def _finish(self):
@@ -667,7 +760,13 @@ class SimpleInstallerGUI:
     def _on_closing(self):
         """窗口关闭事件"""
         if self.state == "installing":
-            if messagebox.askquestion("确认", "安装正在进行中，确定要取消吗？") == "yes":
+            should_close = True
+            if GUI_AVAILABLE and messagebox:
+                try:
+                    should_close = (messagebox.askquestion("确认", "安装正在进行中，确定要取消吗？") == "yes")
+                except Exception:
+                    should_close = True
+            if should_close:
                 self.cancelled = True
                 self.root.destroy()
         else:
@@ -714,20 +813,23 @@ def main() -> int:
         
         # 创建运行时实例
         runtime = InstallerRuntime(installer_path, silent=args.silent)
-        
-        # 检查是否应该使用GUI模式
+
+        # 检查是否应该使用GUI模式 (支持新旧结构)
         use_gui = False
         if not args.silent:
-            # 先解析头部信息以获取配置
             try:
                 runtime._parse_installer()
-                if runtime.header_data and 'config' in runtime.header_data:
-                    config = runtime.header_data['config']
-                    if 'install' in config and config['install'].get('show_ui', False):
+                hd = runtime.header_data or {}
+                # 新结构: 顶层 install
+                if isinstance(hd.get('install'), dict) and hd['install'].get('show_ui'):
+                    use_gui = True
+                # 旧结构: config.install
+                elif isinstance(hd.get('config'), dict):
+                    old_cfg = hd['config']
+                    if isinstance(old_cfg.get('install'), dict) and old_cfg['install'].get('show_ui'):
                         use_gui = True
             except Exception:
-                # 如果解析失败，继续使用命令行模式
-                pass
+                pass  # 解析失败则保持命令行模式
         
         # 运行安装
         success = runtime.run_installation(

@@ -21,7 +21,7 @@ from ..utils import (
     get_temp_dir,
     format_size,
 )
-from ..utils.logging import info, success, error, warning, LogStage
+from ..utils.logging import info, success, error, warning, debug, LogStage
 from .collector import FileCollector, FileInfo
 from .compressor import CompressorFactory, CompressionError
 from .header import HeaderBuilder, HashCalculator
@@ -100,6 +100,7 @@ class Builder:
         
         try:
             info(f"开始构建安装器: {output_path}", stage=LogStage.BUILD)
+            debug(f"构建配置: algorithm={config.compression.algo.value} level={config.compression.level} inputs={len(config.inputs)}", stage=LogStage.BUILD)
             
             # 步骤 1: 收集文件 (0%-20%)
             if progress_callback:
@@ -221,6 +222,11 @@ class Builder:
             success(f"文件收集完成", stage=LogStage.COLLECT)
             info(f"  文件数量: {total_files}")
             info(f"  总大小: {format_size(total_size)}")
+            # 在 DEBUG 级别输出前 20 个文件用于诊断
+            for idx, f in enumerate([ff for ff in all_files if not ff.is_directory][:20]):
+                debug(f"文件[{idx}]: {f.relative_path} size={format_size(f.size)} mtime={int(f.mtime)}", stage=LogStage.COLLECT)
+            if total_files > 20:
+                debug(f"... 还有 {total_files - 20} 个文件未列出", stage=LogStage.COLLECT)
             
             return all_files
             
@@ -279,6 +285,7 @@ class Builder:
             info(f"  原始大小: {format_size(original_size)}")
             info(f"  压缩大小: {format_size(len(compressed_data))}")
             info(f"  压缩率: {compression_ratio:.1f}%")
+            debug(f"压缩数据长度={len(compressed_data)} bytes", stage=LogStage.COMPRESS)
             
             return compressed_data, actual_algorithm
             
@@ -322,6 +329,7 @@ class Builder:
             header_bytes = self.header_builder.serialize_header(header_dict)
             
             success(f"头部数据构建完成 - 大小: {format_size(len(header_bytes))}", stage=LogStage.HEADER)
+            debug(f"头部预览: {header_bytes[:120]!r}...", stage=LogStage.HEADER)
             
             return header_bytes
             
@@ -461,12 +469,23 @@ class Builder:
                     "-m",
                     "PyInstaller",
                     "--onefile",
-                    "--console",  # 改为console模式以便看到输出
+                    "--console",  # 默认 console，稍后按 show_ui 动态替换
                     "--distpath", str(output_dir),
                     "--workpath", str(temp_path / "build"),
                     "--specpath", str(temp_path),
                     "--name", "stub",
                 ]                # 图标
+                # 动态控制是否显示控制台窗口
+                try:
+                    if config.install.show_ui:
+                        # 替换为无控制台
+                        if "--console" in cmd:
+                            cmd[cmd.index("--console")] = "--noconsole"
+                            info("启用 UI: 使用 --noconsole 隐藏控制台窗口", stage=LogStage.STUB)
+                    else:
+                        info("未启用 UI: 保留控制台窗口 (--console)", stage=LogStage.STUB)
+                except AttributeError:
+                    warning("无法检测 install.show_ui，保留 console 模式", stage=LogStage.STUB)
                 # 如果需要管理员权限则添加 UAC 提权标志
                 try:
                     if config.install.require_admin:
@@ -568,6 +587,10 @@ class Builder:
 
             # Footer 结构: <8sQQQQ32s>
             # magic, header_offset, header_len, compressed_offset, compressed_size, archive_hash(32字节)
+            debug(
+                f"Offsets 计算: stub_size={stub_size} header_offset={header_offset} header_len={header_len} compressed_offset={compressed_offset} compressed_size={compressed_size}",
+                stage=LogStage.WRITE
+            )
             footer_struct = struct.pack(
                 '<8sQQQQ32s',
                 FOOTER_MAGIC,

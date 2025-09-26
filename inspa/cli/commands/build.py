@@ -13,6 +13,7 @@ import typer
 from rich.console import Console
 
 from ...config import load_config, ConfigError, ConfigValidationError
+from ...utils.logging import set_log_level, set_log_file, OutputLevel
 
 
 console = Console()
@@ -24,6 +25,7 @@ def build_command(
     icon: Optional[str] = typer.Option(None, "--icon", help="自定义图标文件 (.ico)"),
     force: bool = typer.Option(False, "--force", "-f", help="强制覆盖已存在的输出文件"),
     log_file: Optional[str] = typer.Option(None, "--log-file", help="日志输出文件"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="输出详细调试日志 (DEBUG 级别)"),
 ) -> None:
     """构建安装器
     
@@ -38,6 +40,19 @@ def build_command(
     config_path = Path(config)
     output_path = Path(output)
     
+    # 初始化日志：在任何输出前设置
+    if verbose:
+        set_log_level(OutputLevel.DEBUG)
+    else:
+        # 默认 INFO
+        set_log_level(OutputLevel.INFO)
+
+    if log_file:
+        try:
+            set_log_file(log_file)
+        except Exception:
+            console.print(f"[yellow]无法写入日志文件: {log_file}[/yellow]")
+
     # 检查输出文件
     if output_path.exists() and not force:
         console.print(f"[red]输出文件已存在: {output_path}[/red]")
@@ -58,7 +73,8 @@ def build_command(
             
             if not config_obj.resources:
                 from ...config.schema import ResourcesModel
-                config_obj.resources = ResourcesModel()
+                # 显式传入 icon=None 以兼容某些静态分析器
+                config_obj.resources = ResourcesModel(icon=None)
             config_obj.resources.icon = icon_path
         
         # 创建构建器
@@ -66,6 +82,8 @@ def build_command(
         
         # 开始构建
         console.print("[cyan]开始构建安装器...[/cyan]")
+        if verbose:
+            console.print("[dim]已启用详细模式 -- 将输出调试级日志[/dim]")
         
         def progress_callback(stage: str, current: int, total: int, message: str = "") -> None:
             """进度回调函数，显示进度"""

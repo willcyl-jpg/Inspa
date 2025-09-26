@@ -37,76 +37,91 @@ ui:
 
 install:
   default_path: "C:\\Program Files\\MyApp"
-  
+
 files:
   - source: "dist/"
     target: "."
-    
+
 compression:
   algo: "zstd"
   level: 3
 ```
-  version: "1.0.0"
-  company: "我的公司"
-  description: "应用描述"
+
+version: "1.0.0"
+company: "我的公司"
+description: "应用描述"
 
 ui:
-  window_title: "我的应用安装程序"
-  welcome_heading: "欢迎安装我的应用"
-  welcome_subtitle: "请按步骤完成安装"
+window_title: "我的应用安装程序"
+welcome_heading: "欢迎安装我的应用"
+welcome_subtitle: "请按步骤完成安装"
 
 install:
-  default_path: "%ProgramFiles%/MyApp"
-  allow_user_path: true
-  license_file: "./LICENSE.txt"
+default_path: "%ProgramFiles%/MyApp"
+allow_user_path: true
+license_file: "./LICENSE.txt"
 
 compression:
-  algo: zstd
-  level: 10
+algo: zstd
+level: 10
 
 inputs:
-  - path: ./bin
-  - path: ./config
+
+- path: ./bin
+- path: ./config
 
 post_actions:
-  - type: powershell
-    command: scripts/setup.ps1
-    hidden: true
-    show_in_ui: true
-```
+
+- type: powershell
+  command: scripts/setup.ps1
+  hidden: true
+  show_in_ui: true
+
+````
 
 2. **构建安装器**:
 
 ```bash
 inspa build -c config.yaml -o dist/installer.exe
-```
+````
 
 3. **运行安装器**:
 
 ```bash
 # 正常安装（显示 UI）
 ./installer.exe
+```
+
+## 详细输出
+
+```bash
+inspa build -c config.yaml -o installer.exe --verbose
+```
 
 # 静默安装
+
 ./installer.exe /S
+
 ```
 
 ## 项目结构
 
 ```
+
 Inspa/
-├── inspa/              # 主包
-│   ├── __init__.py
-│   ├── cli/           # CLI 命令行工具
-│   ├── gui/           # GUI 图形界面
-│   ├── config/        # 配置和 Schema
-│   ├── build/         # 构建服务
-│   ├── runtime_stub/  # 安装器运行时
-│   └── utils/         # 通用工具
-├── tests/             # 测试文件
-├── examples/          # 示例配置
-└── docs/              # 文档
-```
+├── inspa/ # 主包
+│ ├── **init**.py
+│ ├── cli/ # CLI 命令行工具
+│ ├── gui/ # GUI 图形界面
+│ ├── config/ # 配置和 Schema
+│ ├── build/ # 构建服务
+│ ├── runtime_stub/ # 安装器运行时
+│ └── utils/ # 通用工具
+├── tests/ # 测试文件
+├── examples/ # 示例配置
+└── docs/ # 文档
+
+````
 
 ## 开发
 
@@ -122,7 +137,7 @@ pip install -e ".[dev]"
 
 # 安装 pre-commit hooks
 pre-commit install
-```
+````
 
 ### 测试
 
@@ -147,7 +162,7 @@ pytest --cov=inspa
 black inspa/ tests/
 
 # 导入排序
-isort inspa/ tests/
+# 详细输出 (DEBUG 日志)
 
 # 类型检查
 mypy inspa/
@@ -200,6 +215,7 @@ inspa gui
 ```
 
 GUI 提供两种模式：
+
 - **向导模式**: 分步引导配置
 - **高级模式**: 集中编辑所有选项
 
