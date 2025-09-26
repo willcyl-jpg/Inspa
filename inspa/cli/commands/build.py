@@ -77,32 +77,50 @@ def build_command(
                     console.print(f"[blue]{stage}[/blue]: {percentage:.0f}%")
         
         try:
-            builder.build(
+            result = builder.build(
                 config_obj,
                 output_path,
                 progress_callback=progress_callback
             )
-                
-            # 构建成功消息
-            console.print(f"[green]✓ 安装器构建完成[/green]: {output_path}")
             
-            # 显示统计信息
-            if output_path.exists():
-                size_mb = output_path.stat().st_size / (1024 * 1024)
-                console.print(f"[blue]文件大小[/blue]: {size_mb:.1f} MB")
+            if result.success:
+                # 构建成功消息
+                console.print(f"[green]✓ 安装器构建完成[/green]: {output_path}")
+
+                # 原始文件名（用于显示/版本注入）: 优先使用 -o 提供的文件名，否则使用配置默认规则
+                try:
+                    if output_path:
+                        original_filename = output_path.name
+                    else:
+                        # fallback: 从配置生成默认文件名
+                        original_filename = f"{config_obj.product.name}_installer.exe"
+                except Exception:
+                    original_filename = f"{config_obj.product.name}_installer.exe"
+
+                console.print(f"[blue]原始文件名[/blue]: {original_filename}")
+
+                # 显示统计信息
+                if output_path.exists():
+                    size_mb = output_path.stat().st_size / (1024 * 1024)
+                    console.print(f"[blue]文件大小[/blue]: {size_mb:.1f} MB")
+            else:
+                console.print(f"[red]✗ 构建失败[/red]: {result.error}")
+                if log_file:
+                    console.print(f"[yellow]请检查日志文件 {log_file} 获取详细信息。[/yellow]")
+                raise typer.Exit(1)
             
         except Exception as e:
-            console.print(f"[red]✗ 构建失败[/red]: {e}")
+            console.print(f"[red]✗ 构建过程中发生意外错误[/red]: {e}")
             if log_file:  # 只有指定了日志文件才显示详细信息
                 console.print(f"[yellow]详细错误信息:[/yellow]\n{traceback.format_exc()}")
             raise typer.Exit(1)
                 
-    except ConfigError as e:
-        console.print(f"[red]配置错误[/red]: {e}")
-        raise typer.Exit(1)
     except ConfigValidationError as e:
         console.print("[red]配置验证失败:[/red]")
         console.print(e.format_errors())
+        raise typer.Exit(1)
+    except ConfigError as e:
+        console.print(f"[red]配置错误[/red]: {e}")
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]构建失败[/red]: {e}")

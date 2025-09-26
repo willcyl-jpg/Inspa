@@ -26,6 +26,11 @@ class CompressionError(Exception):
     pass
 
 
+class DecompressionError(Exception):
+    """解压相关错误"""
+    pass
+
+
 class ProgressCallback(Protocol):
     """进度回调协议"""
     
@@ -121,7 +126,7 @@ class ZstdCompressor(Compressor):
             # 计算总字节数
             total_bytes = sum(f.size for f in files if not f.is_directory)
             
-            with self._cctx.stream_writer(output_stream) as writer:
+            with self._cctx.stream_writer(output_stream, closefd=False) as writer:
                 for file_info in files:
                     if file_info.is_directory:
                         # 目录条目（只记录结构）
@@ -208,7 +213,7 @@ class ZstdCompressor(Compressor):
         except Exception as e:
             if isinstance(e, CompressionError):
                 raise
-            raise CompressionError(f"Zstd 解压失败: {e}")
+            raise DecompressionError(f"Zstd 解压失败: {e}") from e
     
     def _write_file_header(self, writer: BinaryIO, file_info: FileInfo) -> None:
         """写入文件头信息"""
@@ -362,7 +367,7 @@ class ZipCompressor(Compressor):
         except Exception as e:
             if isinstance(e, CompressionError):
                 raise
-            raise CompressionError(f"Zip 解压失败: {e}")
+            raise DecompressionError(f"Zip 解压失败: {e}") from e
 
 
 class CompressorFactory:

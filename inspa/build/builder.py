@@ -9,6 +9,8 @@ import io
 import shutil
 import time
 import traceback
+import struct
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
@@ -23,6 +25,9 @@ from ..utils.logging import info, success, error, warning, LogStage
 from .collector import FileCollector, FileInfo
 from .compressor import CompressorFactory, CompressionError
 from .header import HeaderBuilder, HashCalculator
+
+# 新的快速定位 Footer 魔术字节 (8 bytes)
+FOOTER_MAGIC = b'INSPAF01'
 
 # 进度回调类型
 ProgressCallback = Callable[[str, int, int, str], None]
@@ -127,7 +132,7 @@ class Builder:
             if progress_callback:
                 progress_callback("组装安装器", 70, 100, "生成最终安装器...")
             
-            final_size = self._assemble_installer(header_data, compressed_data, output_path, progress_callback)
+            final_size = self._assemble_installer(config, header_data, compressed_data, output_path, progress_callback)
             
             # 计算统计信息
             self.build_stats['end_time'] = time.time()
@@ -191,26 +196,19 @@ class Builder:
                     continue
                 
                 # 创建文件收集器
-                collector = FileCollector(
-                    base_path=source_path.parent,
-                    exclude_patterns=config.exclude or []
-                )
-                
                 # 收集文件
                 if source_path.is_file():
-                    # 单个文件
                     stat = source_path.stat()
                     file_info = FileInfo(
                         path=source_path.resolve(),
-                        relative_path=Path(input_path.target or source_path.name),
+                        relative_path=Path(source_path.name),
                         size=stat.st_size,
                         mtime=stat.st_mtime,
                         is_directory=False
                     )
                     all_files.append(file_info)
                 else:
-                    # 目录
-                    dir_files = collector.collect_files([input_path])
+                    dir_files = self.collector.collect_files([input_path], exclude_patterns=config.exclude or [])
                     all_files.extend(dir_files)
             
             # 统计信息
@@ -309,16 +307,19 @@ class Builder:
             compression_enum = CompressionAlgorithm(actual_algorithm)
             
             # 构建头部
+            original_size = sum(f.size for f in files if not f.is_directory)
+            compressed_size = len(compressed_data)
             header_dict = self.header_builder.build_header(
                 config=config,
                 files=files,
                 compression_algo=compression_enum,
-                archive_hash=archive_hash
+                archive_hash=archive_hash,
+                original_size=original_size,
+                compressed_size=compressed_size
             )
             
             # 序列化为JSON
-            header_json = self.header_builder.serialize_header(header_dict)
-            header_bytes = header_json.encode('utf-8')
+            header_bytes = self.header_builder.serialize_header(header_dict)
             
             success(f"头部数据构建完成 - 大小: {format_size(len(header_bytes))}", stage=LogStage.HEADER)
             
@@ -407,6 +408,13 @@ class Builder:
         need_custom = True  # 直接强制动态编译以便写入版本信息和图标
         
         try:
+            # 测试模式快速路径: 避免在单元测试里调用 PyInstaller (加速并去除外部依赖)
+            import os
+            if os.environ.get('INSPA_TEST_MODE') == '1':
+                info("检测到测试模式，使用内置伪 stub", stage=LogStage.STUB)
+                dummy = b'MZ' + b'\x00' * 58  # 最小 DOS 头 (不可执行但占位) 60字节
+                success(f"测试模式 stub 准备完成 - 大小: {len(dummy)}B", stage=LogStage.STUB)
+                return dummy
             # 首先尝试使用预编译的 stub
             if not need_custom:
                 stub_path = Path(__file__).parent.parent / "runtime_stub" / "dist" / "stub.exe"
@@ -416,8 +424,8 @@ class Builder:
                     success(f"Runtime Stub准备完成 - 大小: {format_size(len(stub_data))}", stage=LogStage.STUB)
                     return stub_data
             
-            # 如果没有预编译版本，动态编译
-            warning("预编译stub不存在，开始动态编译", stage=LogStage.STUB)
+            # 如果没有预编译版本或需要定制（图标/版本信息），动态编译
+            info("使用动态编译 Runtime Stub 以注入版本信息和图标", stage=LogStage.STUB)
             stub_data = self._compile_runtime_stub(config)
             success(f"Runtime Stub准备完成 - 大小: {format_size(len(stub_data))}", stage=LogStage.STUB)
             return stub_data
@@ -449,16 +457,24 @@ class Builder:
             try:
                 # 使用 PyInstaller 编译 stub
                 cmd = [
-                    "pyinstaller",
+                    sys.executable,
+                    "-m",
+                    "PyInstaller",
                     "--onefile",
                     "--console",  # 改为console模式以便看到输出
                     "--distpath", str(output_dir),
                     "--workpath", str(temp_path / "build"),
                     "--specpath", str(temp_path),
                     "--name", "stub",
-                ]
-
-                # 图标
+                ]                # 图标
+                # 如果需要管理员权限则添加 UAC 提权标志
+                try:
+                    if config.install.require_admin:
+                        info("检测到 require_admin=true, 添加 --uac-admin 以启用 UAC 提权", stage=LogStage.STUB)
+                        cmd.append("--uac-admin")
+                except AttributeError:
+                    # 兼容旧配置对象缺少 install 字段的情况（理论上不会发生）
+                    warning("配置对象缺少 install.require_admin 字段，无法应用 UAC 提权", stage=LogStage.STUB)
                 if config.resources and config.resources.icon:
                     icon_path = str(config.resources.icon)
                     info(f"添加图标: {icon_path}", stage=LogStage.STUB)
@@ -516,7 +532,8 @@ class Builder:
                 raise BuildError(f"编译 Runtime Stub 失败: {e}")
     
     def _assemble_installer(
-        self, 
+        self,
+        config: InspaConfig,
         header_data: bytes, 
         compressed_data: bytes, 
         output_path: Path, 
@@ -532,30 +549,49 @@ class Builder:
             if progress_callback:
                 progress_callback("组装文件", 70, 100, "生成 Runtime Stub...")
             
-            # 生成 Runtime Stub - 暂时使用临时实现
-            stub_data = self._generate_runtime_stub()
+            # 获取或创建 Runtime Stub
+            stub_data = self._get_runtime_stub(config)
             
             if progress_callback:
                 progress_callback("组装文件", 85, 100, "写入最终文件...")
             
-            # 创建最终文件
+            # 预计算各段偏移
+            stub_size = len(stub_data)
+            header_len = len(header_data)
+            # header_offset 应该指向头部长度字段起始位置（即 stub 结束位置），
+            # 运行时解析流程: seek(header_offset) -> 读8字节len -> 读header
+            # 之前误写为 stub_size + 8 导致解析器读取到 header 的前8字节当作长度，产生不匹配
+            header_offset = stub_size  # 指向 8 字节 header_len 字段开头
+            compressed_offset = header_offset + 8 + header_len
+            compressed_size = len(compressed_data)
+            archive_hash = HashCalculator.hash_data(compressed_data)
+
+            # Footer 结构: <8sQQQQ32s>
+            # magic, header_offset, header_len, compressed_offset, compressed_size, archive_hash(32字节)
+            footer_struct = struct.pack(
+                '<8sQQQQ32s',
+                FOOTER_MAGIC,
+                header_offset,
+                header_len,
+                compressed_offset,
+                compressed_size,
+                bytes.fromhex(archive_hash)
+            )
+
+            # 创建最终文件 (保持向后兼容: 仍写入旧的 hash 32 字节, 然后追加 footer)
             with open(output_path, 'wb') as f:
-                # 写入 stub
+                # 1. 写入 runtime stub
                 f.write(stub_data)
-                
-                # 写入头部长度 (8字节 little-endian)
-                header_len = len(header_data)
-                f.write(header_len.to_bytes(8, byteorder='little'))
-                
-                # 写入头部数据
+                # 2. 写入头部长度 (8 字节 LE)
+                f.write(header_len.to_bytes(8, 'little'))
+                # 3. 写入头部数据
                 f.write(header_data)
-                
-                # 写入压缩数据
+                # 4. 写入压缩数据
                 f.write(compressed_data)
-                
-                # 写入尾部哈希校验
-                archive_hash = HashCalculator.hash_data(compressed_data)
+                # 5. 旧格式尾部哈希 (供旧解析器扫描验证) 32 字节
                 f.write(bytes.fromhex(archive_hash))
+                # 6. 新增 Footer 72 字节
+                f.write(footer_struct)
             
             final_size = output_path.stat().st_size
             
@@ -569,38 +605,3 @@ class Builder:
         except Exception as e:
             error(f"组装安装器失败: {e}", stage=LogStage.WRITE)
             raise BuildError(f"组装安装器失败: {e}") from e
-    
-    def _generate_runtime_stub(self) -> bytes:
-        """生成 Runtime Stub
-        
-        优先使用预编译的 stub，如果不存在则使用临时实现
-        """
-        info("生成 Runtime Stub", stage=LogStage.STUB)
-        
-        # 查找预编译的 stub
-        stub_path = Path(__file__).parent.parent / "runtime_stub" / "dist" / "stub.exe"
-        
-        if stub_path.exists():
-            info(f"使用预编译的 Runtime Stub: {stub_path}", stage=LogStage.STUB)
-            stub_data = stub_path.read_bytes()
-            success(f"Runtime Stub 准备完成 - 大小: {format_size(len(stub_data))}", stage=LogStage.STUB)
-            return stub_data
-        
-        # 如果没有预编译版本，创建一个最小的 Python 可执行文件
-        warning("预编译 stub 不存在，使用临时实现", stage=LogStage.STUB)
-        
-        # 返回一个临时的文本作为占位
-        # 实际生产中这里应该调用 PyInstaller 编译 standalone_main.py
-        stub_content = b"""
-# Inspa Runtime Stub Placeholder
-# This is a temporary implementation
-# In production, this should be a compiled executable from standalone_main.py
-
-import sys
-print("Inspa Installer - Temporary stub")
-print("This installer is built with a development stub")
-sys.exit(0)
-"""
-        
-        success(f"临时 Runtime Stub 准备完成 - 大小: {format_size(len(stub_content))}", stage=LogStage.STUB)
-        return stub_content

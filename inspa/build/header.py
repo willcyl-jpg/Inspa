@@ -20,10 +20,10 @@ from .collector import FileInfo
 
 class PathJSONEncoder(json.JSONEncoder):
     """自定义 JSON 编码器，处理 Path 对象"""
-    def default(self, obj):
-        if isinstance(obj, Path):
-            return str(obj).replace('\\', '/')
-        return super().default(obj)
+    def default(self, o):  # type: ignore[override]
+        if isinstance(o, Path):
+            return str(o).replace('\\', '/')
+        return super().default(o)
 
 
 @dataclass
@@ -59,6 +59,7 @@ class HeaderData:
     env: Optional[Dict[str, Any]]   # 环境变量配置
     hash: HashInfo                  # 哈希信息
     build: BuildInfo                # 构建信息
+    stats: Optional[Dict[str, Any]] = None  # 统计信息(扩展)
 
 
 class HashCalculator:
@@ -188,7 +189,9 @@ class HeaderBuilder:
         config: InspaConfig,
         files: List[FileInfo],
         compression_algo: CompressionAlgorithm,
-        archive_hash: str
+        archive_hash: str,
+        original_size: Optional[int] = None,
+        compressed_size: Optional[int] = None
     ) -> HeaderData:
         """构建头部数据
         
@@ -205,6 +208,7 @@ class HeaderBuilder:
         config_fingerprint = self._calculate_config_fingerprint(config)
         
         # 构建各个部分
+        file_count = sum(1 for f in files if not f.is_directory)
         header = HeaderData(
             magic=self.MAGIC,
             schema_version=self.SCHEMA_VERSION,
@@ -223,7 +227,12 @@ class HeaderBuilder:
                 timestamp=int(time.time()),
                 builder_version=self.builder_version,
                 config_fingerprint=config_fingerprint
-            )
+            ),
+            stats={
+                'original_size': original_size,
+                'compressed_size': compressed_size,
+                'file_count': file_count
+            } if original_size is not None and compressed_size is not None else None
         )
         
         return header
@@ -260,7 +269,8 @@ class HeaderBuilder:
                     'timestamp': header.build.timestamp,
                     'builder_version': header.build.builder_version,
                     'config_fingerprint': header.build.config_fingerprint
-                }
+                },
+                'stats': header.stats
             }
             
             # 使用自定义编码器序列化为 JSON（紧凑格式）

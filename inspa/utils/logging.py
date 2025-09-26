@@ -35,6 +35,7 @@ class OutputLevel:
 class LogStage:
     """日志阶段标记（保持向下兼容）"""
     INIT = "INIT"
+    BUILD = "BUILD"  # 新增构建阶段标记，供构建流程使用
     COLLECT = "COLLECT"
     COMPRESS = "COMPRESS"
     HASH = "HASH"

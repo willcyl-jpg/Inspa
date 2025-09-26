@@ -6,11 +6,17 @@ Inspect 命令实现
 """
 
 import json
+import struct
+import hashlib
 from pathlib import Path
+from typing import Optional, Tuple
 
 import typer
 from rich.console import Console
 from rich.table import Table
+
+FOOTER_MAGIC = b'INSPAF01'
+FOOTER_SIZE = 8 + 8 + 8 + 8 + 8 + 32  # <8sQQQQ32s>
 
 
 console = Console()
@@ -54,36 +60,71 @@ def inspect_command(
 
 
 def _read_installer_header(installer_path: Path) -> dict:
-    """读取安装器头信息
-    
-    这是一个占位函数，实际实现需要根据归档格式读取头部。
-    """
-    # TODO: 实现实际的头部读取逻辑
-    # 这里返回一个示例数据
-    return {
-        "magic": "INSPRO1",
-        "schema_version": 1,
-        "product": {
-            "name": "示例应用",
-            "version": "1.0.0",
-            "company": "示例公司"
-        },
-        "compression": {
-            "algo": "zstd",
-            "level": 10
-        },
-        "files": [
-            {"path": "bin/app.exe", "size": 1024000, "mtime": 1699000000},
-            {"path": "config/app.conf", "size": 2048, "mtime": 1699000000}
-        ],
-        "scripts": [
-            {"type": "powershell", "command": "setup.ps1", "hidden": True}
-        ],
-        "build": {
-            "timestamp": 1699000000,
-            "builder_version": "0.1.0"
+    """读取安装器头部（支持 Footer 快速路径 + 旧格式回退）"""
+    with open(installer_path, 'rb') as f:
+        f.seek(0, 2)
+        file_size = f.tell()
+
+        # 优先 Footer
+        if file_size >= FOOTER_SIZE:
+            f.seek(file_size - FOOTER_SIZE)
+            footer = f.read(FOOTER_SIZE)
+            try:
+                magic, header_offset, header_len, comp_offset, comp_size, hash_bytes = struct.unpack('<8sQQQQ32s', footer)
+                if magic == FOOTER_MAGIC:
+                    # 读取头部
+                    f.seek(header_offset)
+                    len_field = f.read(8)
+                    if len(len_field) != 8:
+                        raise ValueError('无法读取头长度字段')
+                    recorded_len = struct.unpack('<Q', len_field)[0]
+                    if recorded_len != header_len:
+                        raise ValueError('头长度与 Footer 不匹配')
+                    header_bytes = f.read(header_len)
+                    data = json.loads(header_bytes.decode('utf-8'))
+                    data['_locator'] = {
+                        'mode': 'footer',
+                        'header_offset': header_offset,
+                        'header_len': header_len,
+                        'compressed_offset': comp_offset,
+                        'compressed_size': comp_size,
+                        'archive_hash': hash_bytes.hex()
+                    }
+                    return data
+            except struct.error:
+                pass  # 回退
+
+        # 旧格式回退：末尾32字节哈希，需扫描 stub 边界
+        f.seek(-32, 2)
+        tail_hash = f.read(32).hex()
+        found = False
+        stub_size = 0
+        header_len = 0
+        for guess in range(100*1024, file_size - 1024, 1024):
+            f.seek(guess)
+            len_bytes = f.read(8)
+            if len(len_bytes) < 8:
+                continue
+            hl = struct.unpack('<Q', len_bytes)[0]
+            if 100 <= hl <= 100*1024:
+                comp_size = file_size - 32 - guess - 8 - hl
+                if comp_size > 0:
+                    found = True
+                    stub_size = guess
+                    header_len = hl
+                    break
+        if not found:
+            raise ValueError('无法定位头部（旧格式回退失败）')
+        f.seek(stub_size + 8)
+        header_bytes = f.read(header_len)
+        data = json.loads(header_bytes.decode('utf-8'))
+        data['_locator'] = {
+            'mode': 'legacy-scan',
+            'stub_size': stub_size,
+            'header_len': header_len,
+            'tail_hash': tail_hash
         }
-    }
+        return data
 
 
 def _display_header_info(header_data: dict, show_files: bool, show_scripts: bool) -> None:
@@ -106,6 +147,25 @@ def _display_header_info(header_data: dict, show_files: bool, show_scripts: bool
     compression = header_data.get("compression", {})
     basic_table.add_row("压缩算法", compression.get("algo", "未知"))
     basic_table.add_row("压缩级别", str(compression.get("level", "")))
+
+    stats = header_data.get('stats') or {}
+    if stats:
+        orig = stats.get('original_size')
+        comp = stats.get('compressed_size')
+        fc = stats.get('file_count')
+        if orig is not None:
+            basic_table.add_row("原始大小", _format_file_size(orig))
+        if comp is not None:
+            basic_table.add_row("压缩大小", _format_file_size(comp))
+        if orig and comp:
+            ratio = (1 - (comp / max(1, orig))) * 100
+            basic_table.add_row("压缩率", f"{ratio:.1f}%")
+        if fc is not None:
+            basic_table.add_row("文件数", str(fc))
+
+    locator = header_data.get('_locator')
+    if locator:
+        basic_table.add_row("定位模式", locator.get('mode', ''))
     
     console.print(basic_table)
     console.print()
