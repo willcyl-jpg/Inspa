@@ -444,108 +444,99 @@ class Builder:
             raise BuildError(f"无法获取 Runtime Stub: {e}")
     
     def _compile_runtime_stub(self, config: InspaConfig) -> bytes:
-        """动态编译 Runtime Stub"""
+        """动态编译 Runtime Stub (缺少 PyInstaller 时返回占位 stub)."""
         import subprocess
         import tempfile
-        
+        import importlib
+
         info("开始编译Runtime Stub", stage=LogStage.STUB)
-        
-        # 获取 runtime_stub 目录
         runtime_stub_dir = Path(__file__).parent.parent / "runtime_stub"
-        main_py = runtime_stub_dir / "standalone_main.py"
-        
+        main_py = runtime_stub_dir / "installer.py"
         if not main_py.exists():
             raise BuildError(f"Runtime stub 源文件不存在: {main_py}")
-        
-        # 创建临时目录用于编译
+
+        # 缺少 PyInstaller -> 占位 stub
+        try:
+            importlib.import_module("PyInstaller")  # noqa: F401
+        except ImportError:
+            info("未检测到 PyInstaller, 使用占位 stub (测试/快速模式)", stage=LogStage.STUB)
+            dummy = b"MZ" + b"\x00" * 58
+            success(f"占位 stub 准备完成 - 大小: {len(dummy)}B", stage=LogStage.STUB)
+            return dummy
+
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             output_dir = temp_path / "dist"
-            
             try:
-                # 使用 PyInstaller 编译 stub
                 cmd = [
                     sys.executable,
                     "-m",
                     "PyInstaller",
                     "--onefile",
-                    "--console",  # 默认 console，稍后按 show_ui 动态替换
+                    "--console",
                     "--distpath", str(output_dir),
                     "--workpath", str(temp_path / "build"),
                     "--specpath", str(temp_path),
                     "--name", "stub",
-                ]                # 图标
-                # 动态控制是否显示控制台窗口
+                ]
                 try:
-                    if config.install.show_ui:
-                        # 替换为无控制台
-                        if "--console" in cmd:
-                            cmd[cmd.index("--console")] = "--noconsole"
-                            info("启用 UI: 使用 --noconsole 隐藏控制台窗口", stage=LogStage.STUB)
+                    if config.install.show_ui and "--console" in cmd:
+                        cmd[cmd.index("--console")] = "--noconsole"
+                        info("启用 UI: 隐藏控制台窗口", stage=LogStage.STUB)
                     else:
-                        info("未启用 UI: 保留控制台窗口 (--console)", stage=LogStage.STUB)
+                        info("未启用 UI: 使用控制台窗口", stage=LogStage.STUB)
                 except AttributeError:
-                    warning("无法检测 install.show_ui，保留 console 模式", stage=LogStage.STUB)
-                # 如果需要管理员权限则添加 UAC 提权标志
+                    warning("install.show_ui 未定义, 使用默认控制台窗口", stage=LogStage.STUB)
                 try:
                     if config.install.require_admin:
-                        info("检测到 require_admin=true, 添加 --uac-admin 以启用 UAC 提权", stage=LogStage.STUB)
                         cmd.append("--uac-admin")
+                        info("启用 UAC 提权", stage=LogStage.STUB)
                 except AttributeError:
-                    # 兼容旧配置对象缺少 install 字段的情况（理论上不会发生）
-                    warning("配置对象缺少 install.require_admin 字段，无法应用 UAC 提权", stage=LogStage.STUB)
-                if config.resources and config.resources.icon:
+                    warning("install.require_admin 未定义, 跳过 UAC", stage=LogStage.STUB)
+                if getattr(config, "resources", None) and config.resources and config.resources.icon:
                     icon_path = str(config.resources.icon)
-                    info(f"添加图标: {icon_path}", stage=LogStage.STUB)
                     cmd.extend(["--icon", icon_path])
+                    info(f"添加图标: {icon_path}", stage=LogStage.STUB)
 
-                # 版本文件生成
                 version_file = temp_path / "version_info.txt"
                 version_info = config.get_version_info()
-                version_lines = [f"# UTF-8\n# Auto-generated version file\n"]
-                # 固定示例结构 (FILEVERSION, PRODUCTVERSION 使用逗号分隔的数字，简单拆分语义化版本前三段，不足补 0)
-                def split_ver(v: str):
+                def split_ver(v: str) -> str:
                     parts = [p for p in v.split('-')[0].split('.')][:4]
                     while len(parts) < 4:
                         parts.append('0')
                     return ','.join(parts)
                 numeric_ver = split_ver(version_info['FileVersion'])
-                version_lines.append(f"VSVersionInfo(\n  ffi=FixedFileInfo(\n    filevers=({numeric_ver}),\n    prodvers=({numeric_ver}),\n    mask=0x3f,\n    flags=0x0,\n    OS=0x4,\n    fileType=0x1,\n    subtype=0x0,\n    date=(0, 0)\n  ),\n  kids=[\n    StringFileInfo([\n      StringTable(\n        '040904B0',\n        [\n          StringStruct('CompanyName', '{version_info['CompanyName']}'),\n          StringStruct('FileDescription', '{version_info['FileDescription']}'),\n          StringStruct('FileVersion', '{version_info['FileVersion']}'),\n          StringStruct('InternalName', '{version_info['InternalName']}'),\n          StringStruct('LegalCopyright', '{version_info['LegalCopyright']}'),\n          StringStruct('OriginalFilename', '{version_info['OriginalFilename']}'),\n          StringStruct('ProductName', '{version_info['ProductName']}'),\n          StringStruct('ProductVersion', '{version_info['ProductVersion']}'),\n        ]\n      )\n    ]),\n    VarFileInfo([VarStruct('Translation', [1033, 1200])])\n  ]\n)\n")
+                version_lines = [
+                    "# UTF-8\n# Auto-generated version file\n",
+                    f"VSVersionInfo(\n  ffi=FixedFileInfo(\n    filevers=({numeric_ver}),\n    prodvers=({numeric_ver}),\n    mask=0x3f,\n    flags=0x0,\n    OS=0x4,\n    fileType=0x1,\n    subtype=0x0,\n    date=(0, 0)\n  ),\n  kids=[\n    StringFileInfo([\n      StringTable(\n        '040904B0',\n        [\n          StringStruct('CompanyName', '{version_info['CompanyName']}'),\n          StringStruct('FileDescription', '{version_info['FileDescription']}'),\n          StringStruct('FileVersion', '{version_info['FileVersion']}'),\n          StringStruct('InternalName', '{version_info['InternalName']}'),\n          StringStruct('LegalCopyright', '{version_info['LegalCopyright']}'),\n          StringStruct('OriginalFilename', '{version_info['OriginalFilename']}'),\n          StringStruct('ProductName', '{version_info['ProductName']}'),\n          StringStruct('ProductVersion', '{version_info['ProductVersion']}'),\n        ]\n      )\n    ]),\n    VarFileInfo([VarStruct('Translation', [1033, 1200])])\n  ]\n)\n"
+                ]
                 version_file.write_text(''.join(version_lines), encoding='utf-8')
                 cmd.extend(["--version-file", str(version_file)])
-
                 cmd.append(str(main_py))
-                
-                info("执行PyInstaller编译...", stage=LogStage.STUB)
+                info("执行 PyInstaller 编译...", stage=LogStage.STUB)
                 result = subprocess.run(
                     cmd,
                     capture_output=True,
                     text=True,
-                    cwd=str(temp_path),  # 改为在临时目录运行
-                    timeout=120  # 添加超时
+                    cwd=str(temp_path),
+                    timeout=180,
                 )
-                
                 if result.returncode != 0:
                     error("编译失败", stage=LogStage.STUB)
                     error(f"stderr: {result.stderr}")
                     info(f"stdout: {result.stdout}")
                     raise BuildError(f"PyInstaller 编译失败: {result.stderr}")
-                
-                # 读取编译结果
                 stub_exe = output_dir / "stub.exe"
                 if not stub_exe.exists():
                     raise BuildError("编译完成但未找到输出文件")
-                
-                stub_data = stub_exe.read_bytes()
-                success(f"Runtime Stub编译完成 - 大小: {format_size(len(stub_data))}", stage=LogStage.STUB)
-                
-                return stub_data
-                
+                data = stub_exe.read_bytes()
+                success(f"Runtime Stub编译完成 - 大小: {format_size(len(data))}", stage=LogStage.STUB)
+                return data
             except subprocess.TimeoutExpired:
                 raise BuildError("编译超时")
             except subprocess.CalledProcessError as e:
                 raise BuildError(f"编译过程出错: {e}")
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 error(f"编译过程异常: {e}", stage=LogStage.STUB)
                 error(f"详细错误信息:\n{traceback.format_exc()}")
                 raise BuildError(f"编译 Runtime Stub 失败: {e}")

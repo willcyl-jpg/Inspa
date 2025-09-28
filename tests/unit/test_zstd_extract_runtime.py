@@ -6,7 +6,7 @@ from inspa.build.builder import Builder
 from inspa.config.schema import (
     InspaConfig, ProductModel, InstallModel, InputPathModel, CompressionModel, CompressionAlgorithm
 )
-from inspa.runtime_stub.installer import InstallerRuntime
+from inspa.runtime_stub import InstallerRuntime
 
 FOOTER_MAGIC = b'INSPAF01'
 FOOTER_SIZE = struct.calcsize('<8sQQQQ32s')
@@ -32,7 +32,16 @@ def build_basic_config(tmp_path: Path) -> InspaConfig:
     )
     inputs = [InputPathModel(path=tmp_path, recursive=True, preserve_structure=True)]
     compression = CompressionModel(algo=CompressionAlgorithm.ZSTD, level=3, fallback_to_zip=False)
-    return InspaConfig(product=product, install=install, inputs=inputs, compression=compression)
+    return InspaConfig(
+        product=product,
+        install=install,
+        inputs=inputs,
+        compression=compression,
+        resources=None,
+        exclude=None,
+        post_actions=None,
+        env=None,
+    )
 
 
 def test_zstd_build_and_parse(tmp_path: Path):
@@ -58,18 +67,20 @@ def test_zstd_build_and_parse(tmp_path: Path):
     header = json.loads(header_bytes.decode('utf-8'))
     assert header.get('compression', {}).get('algo') == 'zstd'
 
-    # runtime extraction using new runtime_stub.installer
-    runtime = InstallerRuntime(out)
+    # runtime extraction using unified runtime_stub (gui.py backend)
+    runtime = InstallerRuntime(out, silent=True)
     ok = runtime.run_installation(silent=True)
     assert ok, 'runtime extraction failed'
-    # Prefer runtime reported install_dir
-    install_dir = runtime.install_dir or Path(header['install']['default_path']).expanduser()
-    # data.txt 可能位于保持的原始目录结构中，因此递归查找
+    # 运行时安装目录逻辑: 默认当前目录 / installed_app 或 header 中 default_path
+    default_path = header.get('install', {}).get('default_path')
+    if default_path:
+        install_dir = Path(default_path).expanduser()
+    else:
+        install_dir = Path.cwd() / 'installed_app'
     matches = list(install_dir.rglob('data.txt')) if install_dir.exists() else []
-    if not matches:
+    if not matches and install_dir.exists():
+        # 兼容结构可能嵌套，递归已做；若仍失败则输出诊断文件列表
         import os
-        print('Install dir listing:', list(os.walk(str(install_dir)) if install_dir.exists() else []))
-        temp_dir = runtime.temp_dir
-        if temp_dir and temp_dir.exists():
-            print('Temp dir listing:', list(os.walk(str(temp_dir))))
+        for root, dirs, files in os.walk(str(install_dir)):
+            pass  # 避免冗长输出，调试时可加入打印
     assert matches, 'data.txt not found after extraction'
