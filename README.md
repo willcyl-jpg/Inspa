@@ -1,6 +1,6 @@
 # Inspa - Windows 单文件自解压安装器构建与运行系统
 
-一个现代化、配置驱动、支持 GUI 与 CLI 的 Windows 单文件安装器（Self-Extracting Installer）构建工具。目标：让「打包 → 分发 → 安装」形成一条可复用、可验证、可扩展的流水线。
+一个现代化、配置驱动、支持统一 GUI/CLI 双模式的 Windows 单文件安装器（Self-Extracting Installer）构建工具。目标：让「打包 → 分发 → 安装」形成一条可复用、可验证、可扩展的流水线。
 
 ## ✨ 核心特性
 
@@ -8,7 +8,7 @@
 - 双算法压缩：Zstd (1–22 级，可回退) / Zip（兼容保底）
 - Footer 快速定位：通过 `INSPAF01` Footer O(1) 解析，无需线性扫描
 - 配置即行为：严格 Pydantic Schema + YAML，支持版本化与验证
-- 图形 + 命令行：CustomTkinter 现代 GUI + Typer CLI（CI/CD 友好）
+- 图形 + 命令行：统一运行时内置 GUI（tkinter），失败自动回退 CLI（CI/CD 友好）
 - 后置脚本：支持 PowerShell / Batch，条件运行、超时、隐藏执行
 - 环境变量设置：支持 PATH 追加与系统级（自动推断管理员权限）
 - 可选静默模式：`/S` 或配置允许时自动无界面安装
@@ -119,7 +119,7 @@ resources:
   icon: assets/app.ico
 ```
 
-3. 构建：
+3. 构建（无需再选择 GUI/CLI 版本，始终是统一运行时）：
 
 ```bash
 inspa build -c installer.yaml -o dist/MyAppInstaller.exe --verbose
@@ -128,15 +128,35 @@ inspa build -c installer.yaml -o dist/MyAppInstaller.exe --verbose
 4. 运行：
 
 ```bash
-./MyAppInstaller.exe          # GUI 或 CLI（依据配置）
+./MyAppInstaller.exe          # 默认：若支持 GUI 则显示界面，否则回退命令行
+./MyAppInstaller.exe --cli    # 强制命令行模式（忽略 GUI）
 ./MyAppInstaller.exe /S       # 静默（若允许）
 ```
+
+### 运行模式（统一 Stub）
+
+自 0.1.x 起已移除构建时 `--runtime` 选项，始终构建“统一运行时”：
+
+| 模式 | 触发方式                                                        | 行为                                           |
+| ---- | --------------------------------------------------------------- | ---------------------------------------------- |
+| GUI  | 默认（存在 tkinter 且未传 `--cli` 且配置 install.show_ui=true） | 安装向导：路径选择、许可协议、进度条、脚本输出 |
+| CLI  | 传入 `--cli` 或 GUI 初始化失败 / 配置 show_ui=false             | 纯文本输出，适合无人值守 / 终端环境            |
+| 静默 | 传入 `/S` 且配置 silent_allowed=true                            | 无交互，按默认路径安装                         |
+
+若配置 `install.show_ui: false`，运行时会直接进入 CLI；设置为 true 获取 GUI。
+
+统一的理由：
+
+1. 减少双分支 / 双 spec 维护成本
+2. 避免用户构建时选错导致发布混乱
+3. 体积差异可接受（tkinter 属标准库；缺失时自动降级）
+4. GUI 失败自动回退 CLI，增强鲁棒性
 
 ## 🧪 CLI 命令概览
 
 | 命令     | 说明                             |
 | -------- | -------------------------------- |
-| build    | 构建安装器                       |
+| build    | 构建安装器（统一运行时）         |
 | validate | 验证配置文件（可配合 --json）    |
 | inspect  | 查看已构建安装器的 Header 元数据 |
 | extract  | 解包安装器内容到目录（调试用）   |
@@ -161,6 +181,7 @@ inspa extract dist/MyAppInstaller.exe -d unpacked/
 - Zstd/Zip 解包（Zstd 采用流式 reader，避免大文件爆内存）
 - 脚本执行（powershell / batch），GUI 模式使用精简进度回调
 - 可选 GUI（customtkinter 可用时启用，否则自动降级）
+- 自动 spec 检测：优先使用根目录 `inspa_runtime.spec`；不存在则回退参数式 PyInstaller（兼容旧命名 `inspa_runtime_gui.spec`）。
 
 关键 API：
 
@@ -246,3 +267,18 @@ MIT License，详见 [LICENSE](LICENSE)。
 ---
 
 如果你有功能建议或想法，欢迎提交 Issue / PR，一起完善一个可维护、可靠的 Windows 安装器解决方案。
+
+## 最近更新（运行时 GUI）
+
+- 去掉了侧边栏顶部重复的应用名称（顶部栏保留应用名，以减少视觉重复）。
+- 侧栏步骤列表现在左对齐并更紧凑，减少顶部空白以提高视觉一致性。
+- 移除了欢迎/进度页的显式“退出”按钮：请使用窗口右上角的关闭 (X) 退出安装程序；在安装进行中点击 X 会触发取消逻辑并安全中断。
+- 修复了在某些环境下 CTkLabel 接收 None width 导致的类型错误，步骤标签宽度参数现在仅在显式设置时传递。
+
+运行时依赖提示：若使用 GUI 功能建议安装 `customtkinter` 与 `pillow`（用于图标显示）：
+
+```powershell
+pip install customtkinter pillow
+```
+
+如果不安装，运行时会回退到标准 tkinter（若可用）或 CLI 模式。

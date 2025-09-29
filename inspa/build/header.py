@@ -60,6 +60,7 @@ class HeaderData:
     hash: HashInfo                  # 哈希信息
     build: BuildInfo                # 构建信息
     stats: Optional[Dict[str, Any]] = None  # 统计信息(扩展)
+    runtime: Optional[Dict[str, Any]] = None  # 运行时信息 (新增: 记录 runtime_type 等)
 
 
 class HashCalculator:
@@ -191,7 +192,7 @@ class HeaderBuilder:
         compression_algo: CompressionAlgorithm,
         archive_hash: str,
         original_size: Optional[int] = None,
-        compressed_size: Optional[int] = None
+        compressed_size: Optional[int] = None,
     ) -> HeaderData:
         """构建头部数据
         
@@ -232,7 +233,9 @@ class HeaderBuilder:
                 'original_size': original_size,
                 'compressed_size': compressed_size,
                 'file_count': file_count
-            } if original_size is not None and compressed_size is not None else None
+            } if original_size is not None and compressed_size is not None else None,
+            # 统一运行时：固定写入统一标记，供旧逻辑或调试使用；后续可逐步移除此字段
+            runtime={'type': 'unified'},
         )
         
         return header
@@ -270,7 +273,8 @@ class HeaderBuilder:
                     'builder_version': header.build.builder_version,
                     'config_fingerprint': header.build.config_fingerprint
                 },
-                'stats': header.stats
+                'stats': header.stats,
+                'runtime': header.runtime,
             }
             
             # 使用自定义编码器序列化为 JSON（紧凑格式）

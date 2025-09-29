@@ -81,7 +81,7 @@ class Builder:
         self,
         config: InspaConfig,
         output_path: Path,
-        progress_callback: Optional[ProgressCallback] = None
+        progress_callback: Optional[ProgressCallback] = None,
     ) -> BuildResult:
         """构建安装器
         
@@ -133,7 +133,13 @@ class Builder:
             if progress_callback:
                 progress_callback("组装安装器", 70, 100, "生成最终安装器...")
             
-            final_size = self._assemble_installer(config, header_data, compressed_data, output_path, progress_callback)
+            final_size = self._assemble_installer(
+                config,
+                header_data,
+                compressed_data,
+                output_path,
+                progress_callback,
+            )
             
             # 计算统计信息
             self.build_stats['end_time'] = time.time()
@@ -301,7 +307,7 @@ class Builder:
         config: InspaConfig, 
         files: list[FileInfo], 
         compressed_data: bytes, 
-        actual_algorithm: str
+        actual_algorithm: str,
     ) -> bytes:
         """构建头部数据"""
         info("构建头部数据", stage=LogStage.HEADER)
@@ -322,7 +328,7 @@ class Builder:
                 compression_algo=compression_enum,
                 archive_hash=archive_hash,
                 original_size=original_size,
-                compressed_size=compressed_size
+                compressed_size=compressed_size,
             )
             
             # 序列化为JSON
@@ -451,7 +457,14 @@ class Builder:
 
         info("开始编译Runtime Stub", stage=LogStage.STUB)
         runtime_stub_dir = Path(__file__).parent.parent / "runtime_stub"
+        # 统一入口与 spec 文件
         main_py = runtime_stub_dir / "installer.py"
+        project_root = Path(__file__).parent.parent.parent
+        # 新的统一 spec 优先，其次兼容旧 gui 命名
+        unified_spec = project_root / "inspa_runtime.spec"
+        legacy_gui_spec = project_root / "inspa_runtime_gui.spec"
+        chosen_spec = unified_spec if unified_spec.exists() else (legacy_gui_spec if legacy_gui_spec.exists() else None)
+        use_spec = chosen_spec is not None
         if not main_py.exists():
             raise BuildError(f"Runtime stub 源文件不存在: {main_py}")
 
@@ -468,35 +481,52 @@ class Builder:
             temp_path = Path(temp_dir)
             output_dir = temp_path / "dist"
             try:
-                cmd = [
-                    sys.executable,
-                    "-m",
-                    "PyInstaller",
-                    "--onefile",
-                    "--console",
-                    "--distpath", str(output_dir),
-                    "--workpath", str(temp_path / "build"),
-                    "--specpath", str(temp_path),
-                    "--name", "stub",
-                ]
-                try:
-                    if config.install.show_ui and "--console" in cmd:
-                        cmd[cmd.index("--console")] = "--noconsole"
-                        info("启用 UI: 隐藏控制台窗口", stage=LogStage.STUB)
-                    else:
-                        info("未启用 UI: 使用控制台窗口", stage=LogStage.STUB)
-                except AttributeError:
-                    warning("install.show_ui 未定义, 使用默认控制台窗口", stage=LogStage.STUB)
-                try:
-                    if config.install.require_admin:
-                        cmd.append("--uac-admin")
-                        info("启用 UAC 提权", stage=LogStage.STUB)
-                except AttributeError:
-                    warning("install.require_admin 未定义, 跳过 UAC", stage=LogStage.STUB)
-                if getattr(config, "resources", None) and config.resources and config.resources.icon:
-                    icon_path = str(config.resources.icon)
-                    cmd.extend(["--icon", icon_path])
-                    info(f"添加图标: {icon_path}", stage=LogStage.STUB)
+                if use_spec and chosen_spec:
+                    spec_name = getattr(chosen_spec, 'name', str(chosen_spec)) if chosen_spec else 'unknown.spec'
+                    info(f"检测到 spec 文件: {spec_name}，使用该 spec 进行编译", stage=LogStage.STUB)
+                    # 注意：使用 spec 时不能再传 makespec 阶段选项（如 --onefile/--name/--icon/--uac-admin/--version-file/--specpath）
+                    # 仅允许传递 dist/work 输出参数（这些属于 build 阶段）
+                    cmd = [
+                        sys.executable,
+                        "-m",
+                        "PyInstaller",
+                        str(chosen_spec),
+                        "--distpath", str(output_dir),
+                        "--workpath", str(temp_path / "build"),
+                    ]
+                else:
+                    info("未找到对应 spec 文件，回退到参数模式", stage=LogStage.STUB)
+                    cmd = [
+                        sys.executable,
+                        "-m",
+                        "PyInstaller",
+                        "--onefile",
+                        "--console",
+                        "--distpath", str(output_dir),
+                        "--workpath", str(temp_path / "build"),
+                        "--specpath", str(temp_path),
+                        "--name", "stub",
+                    ]
+                if not use_spec:  # spec 模式下由 spec 自己决定 console/window
+                    try:
+                        if config.install.show_ui and "--console" in cmd:
+                            cmd[cmd.index("--console")] = "--noconsole"
+                            info("启用 UI: 隐藏控制台窗口", stage=LogStage.STUB)
+                        else:
+                            info("未启用 UI: 使用控制台窗口", stage=LogStage.STUB)
+                    except AttributeError:
+                        warning("install.show_ui 未定义, 使用默认控制台窗口", stage=LogStage.STUB)
+                if not use_spec:
+                    try:
+                        if config.install.require_admin:
+                            cmd.append("--uac-admin")
+                            info("启用 UAC 提权", stage=LogStage.STUB)
+                    except AttributeError:
+                        warning("install.require_admin 未定义, 跳过 UAC", stage=LogStage.STUB)
+                    if getattr(config, "resources", None) and config.resources and config.resources.icon:
+                        icon_path = str(config.resources.icon)
+                        cmd.extend(["--icon", icon_path])
+                        info(f"添加图标: {icon_path}", stage=LogStage.STUB)
 
                 version_file = temp_path / "version_info.txt"
                 version_info = config.get_version_info()
@@ -511,8 +541,11 @@ class Builder:
                     f"VSVersionInfo(\n  ffi=FixedFileInfo(\n    filevers=({numeric_ver}),\n    prodvers=({numeric_ver}),\n    mask=0x3f,\n    flags=0x0,\n    OS=0x4,\n    fileType=0x1,\n    subtype=0x0,\n    date=(0, 0)\n  ),\n  kids=[\n    StringFileInfo([\n      StringTable(\n        '040904B0',\n        [\n          StringStruct('CompanyName', '{version_info['CompanyName']}'),\n          StringStruct('FileDescription', '{version_info['FileDescription']}'),\n          StringStruct('FileVersion', '{version_info['FileVersion']}'),\n          StringStruct('InternalName', '{version_info['InternalName']}'),\n          StringStruct('LegalCopyright', '{version_info['LegalCopyright']}'),\n          StringStruct('OriginalFilename', '{version_info['OriginalFilename']}'),\n          StringStruct('ProductName', '{version_info['ProductName']}'),\n          StringStruct('ProductVersion', '{version_info['ProductVersion']}'),\n        ]\n      )\n    ]),\n    VarFileInfo([VarStruct('Translation', [1033, 1200])])\n  ]\n)\n"
                 ]
                 version_file.write_text(''.join(version_lines), encoding='utf-8')
-                cmd.extend(["--version-file", str(version_file)])
-                cmd.append(str(main_py))
+                if not use_spec:
+                    cmd.extend(["--version-file", str(version_file)])
+                    cmd.append(str(main_py))
+                else:
+                    debug("spec 模式：跳过 --version-file 与入口附加参数，由 spec 控制元数据", stage=LogStage.STUB)
                 info("执行 PyInstaller 编译...", stage=LogStage.STUB)
                 result = subprocess.run(
                     cmd,
@@ -526,7 +559,15 @@ class Builder:
                     error(f"stderr: {result.stderr}")
                     info(f"stdout: {result.stdout}")
                     raise BuildError(f"PyInstaller 编译失败: {result.stderr}")
-                stub_exe = output_dir / "stub.exe"
+                # spec 模式下输出文件名可能在 spec 内定义；尝试推断
+                if use_spec:
+                    # 遍历 dist 目录取第一个 exe
+                    candidates = list(output_dir.glob("*.exe"))
+                    if not candidates:
+                        raise BuildError("spec 编译完成但未找到任何 exe 输出")
+                    stub_exe = candidates[0]
+                else:
+                    stub_exe = output_dir / "stub.exe"
                 if not stub_exe.exists():
                     raise BuildError("编译完成但未找到输出文件")
                 data = stub_exe.read_bytes()
@@ -544,10 +585,10 @@ class Builder:
     def _assemble_installer(
         self,
         config: InspaConfig,
-        header_data: bytes, 
-        compressed_data: bytes, 
-        output_path: Path, 
-        progress_callback: Optional[ProgressCallback] = None
+        header_data: bytes,
+        compressed_data: bytes,
+        output_path: Path,
+        progress_callback: Optional[ProgressCallback] = None,
     ) -> int:
         """组装最终安装器"""
         info(f"组装安装器: {output_path}", stage=LogStage.WRITE)

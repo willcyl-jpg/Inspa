@@ -63,6 +63,17 @@ def build_command(
         # 加载配置
         console.print(f"[cyan]正在加载配置文件[/cyan]: {config_path}")
         config_obj = load_config(config_path)
+
+        # 统一运行时：不再区分 GUI / CLI 构建，始终包含 GUI 能力；运行时可用 --cli 参数强制命令行。
+        try:
+            if not config_obj.install.show_ui:
+                # 若用户关闭了 show_ui，我们仍保留该标记，这样运行时默认走 CLI，使用者可省略 --cli。
+                console.print("[yellow]配置中禁用了 show_ui，构建后默认以命令行模式运行 (可去掉该配置或传 --cli 强制)\n[/yellow]")
+            else:
+                console.print("[yellow]构建统一运行时 (含 GUI + CLI 双模式)\n[/yellow]")
+        except AttributeError:
+            console.print("[red]配置对象缺少 install.show_ui 字段 (Schema 版本问题?)\n[/red]")
+            raise typer.Exit(1)
         
         # 如果指定了图标，更新配置
         if icon:
@@ -98,12 +109,13 @@ def build_command(
             result = builder.build(
                 config_obj,
                 output_path,
-                progress_callback=progress_callback
+                progress_callback=progress_callback,
             )
             
             if result.success:
                 # 构建成功消息
                 console.print(f"[green]✓ 安装器构建完成[/green]: {output_path}")
+                console.print(f"[blue]运行时类型[/blue]: unified (GUI/CLI 二合一)")
 
                 # 原始文件名（用于显示/版本注入）: 优先使用 -o 提供的文件名，否则使用配置默认规则
                 try:

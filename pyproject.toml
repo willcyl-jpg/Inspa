@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "inspa"
-version = "0.1.0"
+version = "0.2.0"
 description = "Windows 单文件自解压安装器构建与运行系统"
 authors = [
     {name = "Project Team", email = "team@inspa.dev"}

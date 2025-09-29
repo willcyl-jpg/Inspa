@@ -1,663 +1,626 @@
-"""Unified runtime installer module.
-
-合并原 `core.py` 与 `gui.py`:
- - InstallerRuntime: 解析 / 解压 / 脚本执行 (原 core)
- - 可选 GUI: InstallerRuntimeGUI + run_gui_installation (原 gui)
-
-对外公共 API:
-    from inspa.runtime_stub import InstallerRuntime, run_gui_installation, GUI_AVAILABLE
-
-兼容说明:
- - 原文件 core.py / gui.py 已被移除，此模块集中维护
- - `run_installation(use_gui=True)` 会自动尝试 GUI
- - 仍可单独调用 run_gui_installation(runtime)
-
+"""Compact, corrected runtime installer.
+功能：GUI（单完成按钮）、解析 footer、解压（zip/zstd）、脚本执行、UAC 提升。
 """
 from __future__ import annotations
-
-# pyright: reportAttributeAccessIssue=false, reportOptionalMemberAccess=false
-
+import io, sys, os, struct, json, zipfile, subprocess, ctypes
 from pathlib import Path
-from typing import Any, Dict, Optional, Callable, List, TYPE_CHECKING, Iterable, Tuple
-import os
-import json
-import struct
-import sys
-import io
-import zipfile
-import subprocess
-
-FOOTER_MAGIC = b"INSPAF01"
-FOOTER_SIZE = 8 + 8 + 8 + 8 + 8 + 32  # <8sQQQQ32s>
-
-# 为可选 GUI 组件预声明 Any 类型，避免 mypy 在缺失依赖环境下的属性访问告警
-ctk: Any  # type: ignore
-messagebox: Any  # type: ignore
-filedialog: Any  # type: ignore
-
-# ----------------------------- GUI 可选依赖检测 -----------------------------
-GUI_AVAILABLE = False
-try:  # pragma: no cover
-    import customtkinter as ctk  # type: ignore
-    from tkinter import messagebox, filedialog  # type: ignore
-    from PIL import Image  # type: ignore  # noqa: F401 (兼容保留)
+from typing import Any, Dict, Optional, Callable, List, Protocol, runtime_checkable, cast
+# Predeclare dynamic GUI symbols as Any to satisfy static analyzers
+ctk: Any
+tk: Any
+ttk: Any
+messagebox: Any
+filedialog: Any
+FOOTER_MAGIC,FOOTER_SIZE = b"INSPAF01",72
+try:
+    import customtkinter as ctk
+    from tkinter import messagebox, filedialog
     GUI_AVAILABLE = True
-except Exception:  # pragma: no cover
-    ctk = None  # type: ignore
-    messagebox = None  # type: ignore
-    filedialog = None  # type: ignore
-    if TYPE_CHECKING:  # 占位类型
-        import customtkinter as ctk  # type: ignore
-        from PIL import Image  # type: ignore
+except Exception:
+    try:
+        import tkinter as tk
+        from tkinter import ttk, messagebox, filedialog
+        ctk = None
+        GUI_AVAILABLE = True
+    except Exception:
+        from typing import cast, Any
+        GUI_AVAILABLE = False
+        ctk = cast(Any, object())
+        tk = cast(Any, object())
+        ttk = cast(Any, object())
+        messagebox = cast(Any, object())
+    filedialog = cast(Any, object())
 
-# ----------------------------- 核心运行时 ----------------------------------
-class InstallerRuntime:
-    """核心安装运行时 (无 GUI 依赖)"""
 
-    def __init__(self, installer_path: Path, silent: bool = False):
-        self.installer_path = installer_path
-        self.header_data: Optional[Dict[str, Any]] = None
-        self.compressed_data: Optional[bytes] = None
-        self.silent = silent
-        self._parsed = False
+if GUI_AVAILABLE and ctk:
+    class InstallerRuntimeGUI:
+        """多阶段现代化安装界面。
 
-    def run_installation(
-        self,
-        silent: bool = False,
-        custom_install_dir: Optional[str] = None,
-        use_gui: bool = False,
-        gui_script_output: bool = True,  # 兼容旧签名占位
-    ) -> bool:
-        if use_gui and GUI_AVAILABLE:
+        步骤: 1 欢迎(路径+许可) → 2 解压 → 3 脚本 → 4 完成
+        对外接口保持: set_install_callback / update_progress / show_success / show_error / run
+        """
+        _STEPNAMES = ["欢迎", "解压", "脚本", "完成"]
+        def __init__(self, app_name: str = "应用程序", default_path: Optional[str] = None, license_text: Optional[str] = None, allow_user_path: bool = True, icon_path: Optional[str] = None):
+            self.app_name = app_name
+            self.default_path = default_path or f"C:/Program Files/{app_name}"
+            self.allow_user_path = allow_user_path
+            self.license_text = license_text
+            self.icon_path = icon_path
+            self.cancelled = False
+            self.install_callback: Optional[Callable[[str], None]] = None
+            self.agree_var: Optional[Any] = None
+            self._current_view = 'welcome'
+            self._step_labels: list[Any] = []
+            self._log_buffer: list[str] = []
+            # Sidebar layout tunables
+            self._SIDEBAR_WIDTH = 168  # 调整宽度（原 190）
+            self._SIDEBAR_OUTER_PADX = 10
+            self._SIDEBAR_STEPS_INNER_PADX = 10
+            self._SIDEBAR_STEP_LABEL_PADX = 2
+            self._SIDEBAR_STEP_LABEL_WIDTH = None  # 可置为固定宽度以对齐数字
+            ctk.set_appearance_mode("light")
+            self.root = ctk.CTk()
+            self.root.title(f"{app_name} 安装程序")
+            self.root.geometry("900x600")
+            self.root.minsize(880,560)
+            self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+            self._define_theme()
+            self._build_layout()
+            self._build_welcome_view()
+            self._activate_step(0)
+
+        # ---------- Theme & Layout ----------
+        def _define_theme(self):
+            self.colors = {
+                'primary': '#1e73e8',
+                'primary_hover': '#155fbd',
+                'bg': '#f5f7fb',
+                'panel': '#ffffff',
+                'border': '#e0e6ef',
+                'text': '#222',
+                'subtext': '#56627a',
+                'danger': '#d93025',
+                'ok': '#1b9e4b'
+            }
+        def _color(self, key:str) -> str:
+            return self.colors.get(key, '#000')
+        def _build_shell_containers(self):
+            self.root.configure(bg=self._color('bg'))
+            self.sidebar = ctk.CTkFrame(self.root, fg_color=self._color('panel'), corner_radius=0, width=self._SIDEBAR_WIDTH)
+            self.sidebar.pack(side='left', fill='y', padx=0, pady=0, anchor='nw')
             try:
-                return run_gui_installation(self, custom_install_dir)
-            except Exception:
-                if not silent:
-                    print("GUI 失败或不可用，降级为命令行模式")
-        try:
-            if not silent:
-                print("开始安装流程\n正在解析安装器...")
-            self._parse_installer()
-            if not self.header_data:
-                if not silent:
-                    print("错误: 无法解析安装器头部")
-                return False
-            install_dir = self._determine_install_dir(custom_install_dir)
-            if not silent:
-                print(f"安装目录: {install_dir}")
-            install_dir.mkdir(parents=True, exist_ok=True)
-            self._extract_files(install_dir, silent)
-            self._run_install_scripts(install_dir, silent)
-            if not silent:
-                print("安装完成！")
-            return True
-        except Exception as e:  # noqa: BLE001
-            if not silent:
-                print(f"安装失败: {e}")
-            return False
-
-    # 解析 ---------------------------------------------------------------
-    def _parse_installer(self) -> None:
-        if self._parsed:
-            return
-        try:
-            header_offset = header_len = 0
-            with open(self.installer_path, "rb") as f:
-                f.seek(0, 2)
-                file_size = f.tell()
-                # 新 Footer
-                if file_size >= FOOTER_SIZE:
-                    try:
-                        f.seek(file_size - FOOTER_SIZE)
-                        footer = f.read(FOOTER_SIZE)
-                        magic, header_offset, header_len, compressed_offset, compressed_size, _ = struct.unpack(
-                            "<8sQQQQ32s", footer
-                        )
-                        if magic == FOOTER_MAGIC and header_offset + header_len <= file_size:
-                            f.seek(header_offset)
-                            if struct.unpack("<Q", f.read(8))[0] != header_len:
-                                raise ValueError("头部长度字段不匹配")
-                            header_bytes = f.read(header_len)
-                            if len(header_bytes) != header_len:
-                                raise ValueError("头部数据读取不完整")
-                            self.header_data = json.loads(header_bytes.decode("utf-8"))
-                            f.seek(compressed_offset)
-                            self.compressed_data = f.read(compressed_size)
-                            if not self.silent:
-                                print("使用 Footer 快速解析成功")
-                            self._parsed = True
-                            return
-                    except Exception:
-                        pass  # 回退旧格式
-                # 旧格式线性探测
-                if file_size < 32:
-                    raise ValueError("文件太小")
-                f.seek(-32, 2); f.read(32)  # 忽略旧 hash
-                found = False
-                for stub_guess in range(100 * 1024, file_size - 1024, 1024):
-                    f.seek(stub_guess)
-                    raw_len = f.read(8)
-                    if len(raw_len) != 8:
-                        continue
-                    cand_len = struct.unpack("<Q", raw_len)[0]
-                    if 100 <= cand_len <= 100 * 1024:
-                        compressed_size = file_size - 32 - stub_guess - 8 - cand_len
-                        if compressed_size > 0:
-                            header_offset = stub_guess
-                            header_len = cand_len
-                            found = True
-                            break
-                if not found:
-                    raise ValueError("无法定位旧格式头部")
-                f.seek(header_offset + 8)
-                header_bytes = f.read(header_len)
-                if len(header_bytes) != header_len:
-                    raise ValueError("旧格式头部截断")
-                self.header_data = json.loads(header_bytes.decode("utf-8"))
-                comp_start = header_offset + 8 + header_len
-                f.seek(comp_start)
-                self.compressed_data = f.read(file_size - 32 - comp_start)
-                if not self.silent:
-                    print("旧格式解析成功")
-                self._parsed = True
-        except Exception as e:  # noqa: BLE001
-            if not self.silent:
-                print(f"解析安装器失败: {e}")
-            raise
-
-    # 安装目录 -----------------------------------------------------------
-    def _determine_install_dir(self, custom_dir: Optional[str]) -> Path:
-        if custom_dir:
-            return Path(custom_dir)
-        if self.header_data:
-            install_cfg = None
-            if "install" in self.header_data and isinstance(self.header_data.get("install"), dict):
-                install_cfg = self.header_data["install"]
-            elif "config" in self.header_data and isinstance(self.header_data.get("config"), dict):
-                install_cfg = self.header_data["config"].get("install")
-            if install_cfg and isinstance(install_cfg, dict):
-                default_path = install_cfg.get("default_path")
-                if default_path:
-                    return Path(os.path.expandvars(default_path))
-        return Path.cwd() / "installed_app"
-
-    # 解压 ---------------------------------------------------------------
-    def _extract_files(
-        self,
-        install_dir: Path,
-        silent: bool = False,
-        file_callback: Optional[Callable[[str], None]] = None,
-    ) -> None:
-        if not self.compressed_data:
-            raise RuntimeError("没有压缩数据可解压")
-        algo = "zip"
-        if self.header_data:
-            comp_block = self.header_data.get("compression", {}) or {}
-            algo = comp_block.get("algo") or algo
-            if algo == "zip" and "config" in self.header_data:  # 旧结构兼容
-                algo = self.header_data["config"].get("compression", {}).get("algo", "zip")
-        if not silent:
-            print(f"正在解压文件... (算法: {algo})")
-        if algo == "zstd":
-            self._extract_zstd(install_dir, file_callback)
-        else:
-            self._extract_zip(install_dir, file_callback)
-        if not silent:
-            print(f"文件解压完成到: {install_dir}")
-
-    def _extract_zstd(self, install_dir: Path, file_callback: Optional[Callable[[str], None]]) -> None:
-        # compressed_data 在 _extract_files 之前已经检查，这里断言用于类型收窄
-        assert self.compressed_data is not None, "compressed_data 未初始化"
-        if "zstandard" not in sys.modules:
-            try:
-                import zstandard as zstd  # type: ignore
-            except Exception as e:  # pragma: no cover
-                raise RuntimeError(f"无法加载 zstandard 库: {e}")
-        else:
-            zstd = sys.modules["zstandard"]  # type: ignore
-        dctx = zstd.ZstdDecompressor()
-        reader = dctx.stream_reader(io.BytesIO(self.compressed_data))
-        try:
-            while True:
-                header = reader.read(4)
-                if not header or len(header) < 4:
-                    break
-                path_len = int.from_bytes(header, "little")
-                if path_len <= 0 or path_len > 4096:
-                    break
-                path_bytes = reader.read(path_len)
-                if len(path_bytes) != path_len:
-                    break
-                rel_path = path_bytes.decode("utf-8")
-                if file_callback:
-                    try:
-                        file_callback(rel_path)
-                    except Exception:
-                        pass
-                meta = reader.read(17)
-                if len(meta) != 17:
-                    break
-                size, mtime, is_dir_flag = struct.unpack("<QQB", meta)
-                target_path = install_dir / rel_path
-                if is_dir_flag:
-                    target_path.mkdir(parents=True, exist_ok=True)
-                    continue
-                target_path.parent.mkdir(parents=True, exist_ok=True)
-                remaining = size
-                with open(target_path, "wb") as out_f:
-                    while remaining > 0:
-                        chunk = reader.read(min(64 * 1024, remaining))
-                        if not chunk:
-                            break
-                        out_f.write(chunk)
-                        remaining -= len(chunk)
-                try:
-                    os.utime(target_path, (mtime, mtime))
-                except Exception:
-                    pass
-        finally:
-            try:
-                reader.close()
+                self.sidebar.pack_propagate(False)
             except Exception:
                 pass
-
-    def _extract_zip(self, install_dir: Path, file_callback: Optional[Callable[[str], None]]) -> None:
-        assert self.compressed_data is not None, "compressed_data 未初始化"
-        with zipfile.ZipFile(io.BytesIO(self.compressed_data), "r") as zf:
-            for info in zf.infolist():
-                zf.extract(info, install_dir)
-                if not info.is_dir() and file_callback:
-                    try:
-                        file_callback(info.filename)
-                    except Exception:
-                        pass
-
-    # 脚本执行 -----------------------------------------------------------
-    def _run_install_scripts(self, install_dir: Path, silent: bool = False) -> None:
-        if not self.header_data:
-            return
-        scripts: List[Dict[str, Any]] = []
-        if "scripts" in self.header_data and isinstance(self.header_data["scripts"], list):
-            scripts = self.header_data["scripts"]  # 新结构
-        elif "config" in self.header_data:
-            return  # 旧结构忽略
-        if not scripts:
-            return
-        for script in scripts:
-            try:
-                cmd_type = script.get("type")
-                command = script.get("command")
-                if not command:
-                    continue
-                if not silent:
-                    print(f"运行安装脚本: {command}")
-                if cmd_type == "batch":
-                    subprocess.run([command] + (script.get("args") or []), cwd=install_dir, check=True)
-                elif cmd_type == "powershell":
-                    subprocess.run(
-                        [
-                            "powershell",
-                            "-NoLogo",
-                            "-NoProfile",
-                            "-ExecutionPolicy",
-                            "Bypass",
-                            "-File",
-                            command,
-                        ]
-                        + (script.get("args") or []),
-                        cwd=install_dir,
-                        check=True,
-                    )
-                else:  # 直接执行
-                    subprocess.run([command] + (script.get("args") or []), cwd=install_dir, check=True)
-            except subprocess.CalledProcessError as e:  # noqa: PERF203
-                if not silent:
-                    print(f"脚本执行失败: {e}")
-
-    # 简化脚本执行 (GUI 用) -----------------------------------------------
-    def _run_scripts_simple(self, install_dir: Path) -> None:
-        if not self.header_data:
-            return
-        scripts = self.header_data.get("scripts")
-        if not isinstance(scripts, list):
-            return
-        for script in scripts:
-            try:
-                cmd_type = script.get("type")
-                command = script.get("command")
-                if not command:
-                    continue
-                args: List[str] = script.get("args") or []
-                working_dir = script.get("working_dir")
-                cwd = install_dir
-                if working_dir:
-                    wd = install_dir / working_dir
-                    if wd.exists():
-                        cwd = wd
-                if cmd_type == "powershell":
-                    if command.lower().endswith(".ps1") and (cwd / command).exists():
-                        full = (cwd / command) if not Path(command).is_absolute() else Path(command)
-                        run_cmd = [
-                            "powershell",
-                            "-NoLogo",
-                            "-NoProfile",
-                            "-ExecutionPolicy",
-                            "Bypass",
-                            "-File",
-                            str(full),
-                        ] + args
-                    else:
-                        run_cmd = [
-                            "powershell",
-                            "-NoLogo",
-                            "-NoProfile",
-                            "-ExecutionPolicy",
-                            "Bypass",
-                            "-Command",
-                            command,
-                        ] + args
-                elif cmd_type == "batch":
-                    run_cmd = ["cmd.exe", "/c", command] + args
-                else:
-                    continue
-                subprocess.run(run_cmd, cwd=str(cwd), timeout=int(script.get("timeout_sec", 300)))
-            except Exception:  # noqa: BLE001
-                continue
-
-# ----------------------------- GUI 部分 ------------------------------------
-class InstallerRuntimeGUI:  # 轻量 GUI
-    def __init__(
-        self,
-        app_name: str = "应用程序",
-        default_path: Optional[str] = None,
-        required_space_mb: int = 200,
-        license_text: Optional[str] = None,
-        welcome_message: Optional[str] = None,
-    ):
-        if not GUI_AVAILABLE:
-            raise ImportError("GUI依赖未安装，无法启动图形界面")
-        self.app_name = app_name
-        self.default_path = default_path or f"C:/Program Files/{app_name}"
-        self.required_space_mb = required_space_mb
-        self.license_text = license_text
-        self.welcome_message = welcome_message or f"欢迎使用 {app_name} 安装程序。请确认安装路径并阅读许可协议。"
-        self.cancelled = False
-        self.install_path = self.default_path
-        self.install_callback: Optional[Callable[[str], None]] = None
-        # 同时兼容未导入 tkinter 时的类型：运行期赋值 BooleanVar, 这里标注 Optional[Any]
-        self.agree_var: Optional[Any] = None  # noqa: ANN401 (GUI 动态类型)
-
-        ctk.set_appearance_mode("Light")
-        ctk.set_default_color_theme("blue")
-        self.root = ctk.CTk()
-        self.root.title(app_name)
-        self.root.geometry("520x420")
-        self.root.resizable(False, False)
-        self._center_window()
-        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
-        self._build()
-        self._switch_state("ready")
-
-    def _center_window(self) -> None:
-        self.root.update_idletasks()
-        w = self.root.winfo_width(); h = self.root.winfo_height()
-        x = (self.root.winfo_screenwidth() // 2) - (w // 2)
-        y = (self.root.winfo_screenheight() // 2) - (h // 2)
-        self.root.geometry(f"{w}x{h}+{x}+{y}")
-
-    def _build(self) -> None:
-        self.root.grid_columnconfigure(0, weight=1)
-        header = ctk.CTkFrame(self.root, height=70, corner_radius=0, fg_color=("gray90", "gray20"))
-        header.grid(row=0, column=0, sticky="ew")
-        header.pack_propagate(False)
-        ctk.CTkLabel(header, text=self.app_name, font=ctk.CTkFont(size=20, weight="bold")).pack(side="left", padx=20)
-        self.footer = ctk.CTkFrame(self.root, height=70, corner_radius=0)
-        self.footer.grid(row=2, column=0, sticky="ew", padx=10, pady=10)
-        self.footer.grid_columnconfigure(0, weight=1)
-        self.ready_frame = ctk.CTkFrame(self.root, fg_color="transparent")
-        self.installing_frame = ctk.CTkFrame(self.root, fg_color="transparent")
-        self.finished_frame = ctk.CTkFrame(self.root, fg_color="transparent")
-        self._build_ready(); self._build_installing(); self._build_finished()
-
-    def _build_ready(self) -> None:
-        frame = self.ready_frame
-        box = ctk.CTkFrame(frame, fg_color="transparent")
-        box.pack(fill="both", expand=True, padx=30, pady=20)
-        if self.welcome_message:
-            ctk.CTkLabel(box, text=self.welcome_message, justify="left", wraplength=440).pack(anchor="w", pady=(5, 10))
-        if self.license_text:
-            ctk.CTkLabel(box, text="许可协议：", font=ctk.CTkFont(size=12, weight="bold")).pack(anchor="w")
-            lic = ctk.CTkTextbox(box, height=120, wrap="word")
-            lic.pack(fill="x", pady=(4, 4)); lic.insert("0.0", self.license_text); lic.configure(state="disabled")
-            from tkinter import BooleanVar
-            self.agree_var = BooleanVar(value=False)
-            self.agree_cb = ctk.CTkCheckBox(box, text="我已阅读并同意许可协议", variable=self.agree_var, command=self._toggle_agree)
-            self.agree_cb.pack(anchor="w", pady=(0, 8))
-        from tkinter import StringVar
-        path_row = ctk.CTkFrame(box, fg_color="transparent"); path_row.pack(fill="x", pady=(4, 4))
-        ctk.CTkLabel(path_row, text="安装路径:").pack(side="left")
-        self.path_var = StringVar(value=self.default_path)
-        self.path_entry = ctk.CTkEntry(path_row, textvariable=self.path_var, width=320); self.path_entry.pack(side="left", padx=5)
-        ctk.CTkButton(path_row, text="浏览", width=60, command=self._browse).pack(side="left")
-        self.start_btn = ctk.CTkButton(box, text="开始安装", command=self._start_install); self.start_btn.pack(pady=(15, 0))
-        if self.agree_var is not None:
-            self.start_btn.configure(state="disabled")
-
-    def _build_installing(self) -> None:
-        frame = self.installing_frame
-        box = ctk.CTkFrame(frame, fg_color="transparent")
-        box.pack(fill="both", expand=True, padx=30, pady=60)
-        from tkinter import StringVar
-        self.progress_var = StringVar(value="准备中...")
-        self.progress_bar = ctk.CTkProgressBar(box, width=420); self.progress_bar.pack(pady=(0, 10)); self.progress_bar.set(0)
-        ctk.CTkLabel(box, textvariable=self.progress_var).pack()
-
-    def _build_finished(self) -> None:
-        frame = self.finished_frame
-        box = ctk.CTkFrame(frame, fg_color="transparent"); box.pack(fill="both", expand=True, padx=30, pady=60)
-        self.finish_label = ctk.CTkLabel(box, text="安装完成", font=ctk.CTkFont(size=16, weight="bold")); self.finish_label.pack(pady=(0, 10))
-        ctk.CTkButton(box, text="关闭", command=self._on_close).pack()
-
-    def _toggle_agree(self) -> None:
-        if self.agree_var is not None:
-            self.start_btn.configure(state="normal" if self.agree_var.get() else "disabled")
-
-    def _browse(self) -> None:
-        if filedialog:
-            d = filedialog.askdirectory(initialdir=self.path_var.get())
-            if d:
-                self.path_var.set(d)
-
-    def _start_install(self) -> None:
-        if self.agree_var is not None and not self.agree_var.get():
-            if messagebox:
-                messagebox.showwarning("提示", "请先同意许可协议")
-            return
-        self.install_path = self.path_var.get().strip()
-        if not self.install_path:
-            if messagebox:
-                messagebox.showerror("错误", "安装路径不能为空")
-            return
-        self._switch_state("installing")
-        cb = self.install_callback
-        if cb is not None:
-            import threading
-            def _task():
+            self.main_container = ctk.CTkFrame(self.root, fg_color=self._color('bg'))
+            self.main_container.pack(side='right', fill='both', expand=True)
+            # 移除了标题栏后，直接让步骤区域靠近顶部，仅留少量间距
+            # Steps list
+            steps_frame = ctk.CTkFrame(self.sidebar, fg_color=self._color('panel'))
+            # 更紧凑靠顶：缩小顶部留白 (原 6 -> 2)
+            steps_frame.pack(fill='x', padx=4, pady=(2,8), anchor='w')
+            self._step_labels.clear()
+            for idx, name in enumerate(self._STEPNAMES):
+                text_val = f"{idx+1}. {name}"
+                lbl_kwargs: dict[str, Any] = {
+                    'text': text_val,
+                    'anchor': 'w',
+                    'justify': 'left',
+                    'font': ("Segoe UI", 13),
+                    'text_color': self._color('subtext'),
+                }
+                # 仅当设置固定宽度时才传递，避免 None 触发底层类型转换错误
+                if self._SIDEBAR_STEP_LABEL_WIDTH is not None:
+                    lbl_kwargs['width'] = int(self._SIDEBAR_STEP_LABEL_WIDTH)
+                lbl = ctk.CTkLabel(steps_frame, **lbl_kwargs)
+                lbl.pack(anchor='w', pady=2, padx=(4,0))
+                self._step_labels.append(lbl)
+        def _build_layout(self):
+            # Top bar (icon + subtitle) above split
+            top_bar = ctk.CTkFrame(self.root, fg_color=self._color('panel'), corner_radius=0, height=70)
+            top_bar.pack(fill='x', side='top')
+            inner = ctk.CTkFrame(top_bar, fg_color=self._color('panel'))
+            inner.pack(fill='both', expand=True, padx=18, pady=8)
+            # icon
+            if self.icon_path:
                 try:
-                    cb(self.install_path)
-                except Exception as e:  # pragma: no cover
-                    if messagebox:
-                        messagebox.showerror("错误", str(e))
-            threading.Thread(target=_task, daemon=True).start()
-
-    def update_progress(self, value: float, message: str) -> None:
-        if hasattr(self, "progress_bar"):
-            self.progress_bar.set(max(0.0, min(1.0, value)))
-        if hasattr(self, "progress_var"):
-            self.progress_var.set(message)
-        self.root.update_idletasks()
-
-    def show_success(self) -> None:
-        self._switch_state("finished"); self.finish_label.configure(text="安装完成")
-
-    def show_error(self, msg: str) -> None:
-        self._switch_state("finished"); self.finish_label.configure(text=f"安装失败: {msg}")
-
-    def set_install_callback(self, cb: Callable[[str], None]) -> None:
-        self.install_callback = cb
-
-    def run(self) -> bool:
-        self.root.mainloop(); return not self.cancelled
-
-    def _switch_state(self, state: str) -> None:
-        for f in (self.ready_frame, self.installing_frame, self.finished_frame):
-            f.grid_remove()
-        mapping = {
-            "ready": self.ready_frame,
-            "installing": self.installing_frame,
-            "finished": self.finished_frame,
-        }
-        frame = mapping.get(state, self.ready_frame)
-        frame.grid(row=1, column=0, sticky="nsew")
-
-    def _on_close(self) -> None:
-        if hasattr(self, "progress_bar") and self.progress_bar.get() < 1.0:
-            if messagebox and messagebox.askokcancel("确认", "安装尚未完成，确定要退出吗?"):
-                self.cancelled = True; self.root.destroy(); return
-            if self.progress_bar.get() < 1.0:
-                return
-        self.root.destroy()
-
-
-def run_gui_installation(runtime: InstallerRuntime, custom_install_dir: Optional[str] = None) -> bool:
-    if not GUI_AVAILABLE or InstallerRuntimeGUI is None:  # type: ignore[arg-type]
-        return False
-
-    def _read_license(license_path: Optional[str]) -> Optional[str]:
-        if not license_path:
-            return None
-        p = Path(license_path)
-        if not p.exists():
-            return None
-        for enc in ("utf-8", "gbk"):
-            try:
-                return p.read_text(encoding=enc)
-            except Exception:
-                continue
-        return "无法读取许可文件"
-
-    def _estimate_required_space(header: Dict[str, Any], compressed_len: int | None) -> int:
-        total_size = 0
-        files_meta = header.get("files")
-        if isinstance(files_meta, list):
-            for item in files_meta:
-                if isinstance(item, dict) and "size" in item:
-                    try:
-                        total_size += int(item["size"])  # noqa: PLW2901
-                    except Exception:
-                        pass
-        if total_size > 0:
-            return max(1, int(total_size / (1024 * 1024)))
-        if compressed_len:
-            try:
-                return max(1, int(compressed_len * 1.5 / (1024 * 1024)))
-            except Exception:
-                return 200
-        return 200
-
-    try:
-        if not getattr(runtime, "_parsed", False):  # noqa: SLF001
-            runtime._parse_installer()  # type: ignore[attr-defined]
-        header: Dict[str, Any] = getattr(runtime, "header_data", {}) or {}  # type: ignore[attr-defined]
-        if not header:
-            return False
-        product = header.get("product") if isinstance(header.get("product"), dict) else None
-        config_block = header.get("config") if isinstance(header.get("config"), dict) else None
-        app_name = (
-            (product or {}).get("name")
-            or (config_block or {}).get("app", {}).get("name")
-            or "应用程序"
-        )
-        install_cfg = header.get("install") if isinstance(header.get("install"), dict) else None
-        if not install_cfg and config_block:
-            ic = config_block.get("install")
-            if isinstance(ic, dict):
-                install_cfg = ic
-        default_path = install_cfg.get("default_path") if install_cfg else None
-        license_file = install_cfg.get("license_file") if install_cfg else None
-        if custom_install_dir:
-            default_path = custom_install_dir
-        license_text = _read_license(license_file)
-        required_space_mb = _estimate_required_space(header, len(getattr(runtime, "compressed_data", b"")))  # type: ignore[attr-defined]
-        gui = InstallerRuntimeGUI(
-            app_name=app_name,
-            default_path=default_path,
-            required_space_mb=required_space_mb or 200,
-            license_text=license_text,
-            welcome_message=f"欢迎安装 {app_name}",
-        )
-
-        def install_callback(chosen_path: str) -> None:
-            try:
-                install_dir = Path(chosen_path)
-                install_dir.mkdir(parents=True, exist_ok=True)
-                gui.update_progress(0.05, "准备中...")
-                total_files = 0
-                processed_files = 0
-                try:
-                    hd_local: Dict[str, Any] = getattr(runtime, "header_data", {})  # type: ignore[attr-defined]
-                    files_meta = hd_local.get("files")
-                    if isinstance(files_meta, list):
-                        total_files = sum(
-                            1
-                            for fmeta in files_meta
-                            if isinstance(fmeta, dict)
-                            and not fmeta.get("is_directory")
-                        ) or 0
+                    from PIL import Image
+                    img = Image.open(self.icon_path).resize((48,48))
+                    icon = ctk.CTkImage(light_image=img, size=(48,48))
+                    ctk.CTkLabel(inner, image=icon, text='').pack(side='left', padx=(0,12))
                 except Exception:
-                    total_files = 0
+                    pass
+            txt = ctk.CTkFrame(inner, fg_color=self._color('panel'))
+            txt.pack(side='left', fill='x', expand=True)
+            ctk.CTkLabel(txt, text=self.app_name, font=("Segoe UI", 20, 'bold'), text_color=self._color('primary')).pack(anchor='w')
+            ctk.CTkLabel(txt, text='欢迎使用安装向导', font=("Segoe UI", 13), text_color=self._color('subtext')).pack(anchor='w')
+            # containers
+            self._build_shell_containers()
+        # ---------- Step state ----------
+        def _step_index_from_view(self) -> int:
+            mapping = {'welcome':0,'progress':1,'scripts':2,'finish':3}
+            return mapping.get(self._current_view,0)
+        def _activate_step(self, idx:int):
+            for i,lbl in enumerate(self._step_labels):
+                if i==idx:
+                    lbl.configure(text_color=self._color('primary'), font=("Segoe UI", 13, 'bold'))
+                else:
+                    lbl.configure(text_color=self._color('subtext'), font=("Segoe UI", 13))
+        # ---------- Views ----------
+        def _clear_main(self):
+            for w in self.main_container.winfo_children(): w.destroy()
+        def _build_welcome_view(self):
+            self._current_view='welcome'; self._clear_main()
+            wrap = ctk.CTkFrame(self.main_container, fg_color=self._color('panel'), corner_radius=14)
+            wrap.pack(fill='both', expand=True, padx=22, pady=18)
+            # Path + validation
+            path_section = ctk.CTkFrame(wrap, fg_color=self._color('panel'))
+            path_section.pack(fill='x', pady=(18,10), padx=20)
+            ctk.CTkLabel(path_section, text='安装路径', font=("Segoe UI", 14, 'bold'), text_color=self._color('primary')).pack(anchor='w')
+            self.path_var = ctk.StringVar(value=self.default_path)
+            row = ctk.CTkFrame(path_section, fg_color=self._color('panel'))
+            row.pack(fill='x', pady=(8,4))
+            self._path_entry = ctk.CTkEntry(row, textvariable=self.path_var, fg_color=self._color('bg'), corner_radius=6)
+            self._path_entry.pack(side='left', fill='x', expand=True, padx=(0,10))
+            self._browse_btn = ctk.CTkButton(row, text='浏览', command=self._browse, fg_color=self._color('primary'), hover_color=self._color('primary_hover'), width=90)
+            self._browse_btn.pack(side='left')
+            if not self.allow_user_path:
+                self._path_entry.configure(state='disabled'); self._browse_btn.configure(state='disabled')
+            self._path_warn = ctk.CTkLabel(path_section, text='', text_color=self._color('danger'), font=("Segoe UI", 11))
+            self._path_warn.pack(anchor='w')
+            self.path_var.trace_add('write', lambda *_: self._validate_path())
+            # License
+            if self.license_text:
+                lic_section = ctk.CTkFrame(wrap, fg_color=self._color('panel'))
+                lic_section.pack(fill='both', expand=True, padx=20, pady=(4,8))
+                ctk.CTkLabel(lic_section, text='许可协议', font=("Segoe UI", 14, 'bold'), text_color=self._color('primary')).pack(anchor='w')
+                box = ctk.CTkTextbox(lic_section, height=180, fg_color=self._color('bg'), text_color=self._color('text'))
+                box.pack(fill='both', expand=True, pady=(8,4))
+                box.insert('0.0', self.license_text); box.configure(state='disabled')
+                self.agree_var = ctk.BooleanVar(value=False)
+                ctk.CTkCheckBox(lic_section, text='我已阅读并接受许可协议', variable=self.agree_var, command=self._update_start_state).pack(anchor='w', pady=(4,0))
+            else:
+                self.agree_var = None
+            # Start button
+            actions = ctk.CTkFrame(wrap, fg_color=self._color('panel'))
+            actions.pack(fill='x', pady=(12,10), padx=20)
+            self.start_btn = ctk.CTkButton(actions, text='开始安装', command=self._start_install, fg_color=self._color('primary'), hover_color=self._color('primary_hover'), height=40, font=("Segoe UI", 15, 'bold'))
+            self.start_btn.pack(fill='x')
+            self._update_start_state()
+        def _build_progress_view(self):
+            self._current_view='progress'; self._clear_main()
+            wrap = ctk.CTkFrame(self.main_container, fg_color=self._color('panel'), corner_radius=14)
+            wrap.pack(fill='both', expand=True, padx=22, pady=18)
+            ctk.CTkLabel(wrap, text='正在安装', font=("Segoe UI", 18, 'bold'), text_color=self._color('primary')).pack(anchor='w', padx=20, pady=(16,4))
+            self.progress = ctk.CTkProgressBar(wrap, height=10, progress_color=self._color('primary'), fg_color=self._color('bg'))
+            self.progress.pack(fill='x', padx=20, pady=(6,10))
+            self._pb_label = ctk.CTkLabel(wrap, text='', text_color=self._color('subtext'))
+            self._pb_label.pack(anchor='w', padx=20)
+            # Log area
+            log_frame = ctk.CTkFrame(wrap, fg_color=self._color('panel'))
+            log_frame.pack(fill='both', expand=True, padx=20, pady=(12,10))
+            self.log = ctk.CTkTextbox(log_frame, fg_color=self._color('bg'), text_color=self._color('text'))
+            self.log.pack(fill='both', expand=True)
+            self.log.configure(state='disabled')
+            # Cancel button
+            btn_row = ctk.CTkFrame(wrap, fg_color=self._color('panel'))
+            btn_row.pack(fill='x', padx=20, pady=(4,4))
+            self.cancel_btn = ctk.CTkButton(btn_row, text='取消安装', command=self._on_cancel, fg_color=self._color('danger'), hover_color='#b21f1a')
+            self.cancel_btn.pack(side='right')
+            # Flush early buffered logs if any
+            for line in self._log_buffer:
+                self._append_log(line)
+            self._log_buffer.clear()
+        def _build_finish_view(self):
+            self._current_view='finish'; self._clear_main()
+            wrap = ctk.CTkFrame(self.main_container, fg_color=self._color('panel'), corner_radius=14)
+            wrap.pack(fill='both', expand=True, padx=22, pady=18)
+            ctk.CTkLabel(wrap, text='安装完成', font=("Segoe UI", 22, 'bold'), text_color=self._color('primary')).pack(pady=(70,10))
+            ctk.CTkLabel(wrap, text='您可以现在关闭此安装程序。', font=("Segoe UI", 14), text_color=self._color('subtext')).pack(pady=(0,20))
+            ctk.CTkButton(wrap, text='完成', command=self._on_close, fg_color=self._color('primary'), hover_color=self._color('primary_hover'), width=180, height=42).pack()
 
-                def file_cb(rel_path: str):
-                    nonlocal processed_files, total_files
-                    if total_files <= 0:
-                        return
-                    processed_files += 1
-                    base_start, base_end = 0.05, 0.80
-                    span = base_end - base_start
-                    ratio = min(1.0, processed_files / max(1, total_files))
-                    gui.update_progress(base_start + span * ratio, f"解压 {processed_files}/{total_files}: {rel_path}")
+        # ---------- Validation & State ----------
+        def _validate_path(self):
+            if not self.allow_user_path:
+                self._path_warn.configure(text='')
+                return True
+            p = self.path_var.get().strip()
+            if not p:
+                self._path_warn.configure(text='路径不能为空')
+                return False
+            invalid_chars = set('<>"|?*')
+            if any(c in invalid_chars for c in p):
+                self._path_warn.configure(text='包含非法字符')
+                return False
+            try:
+                parent = Path(p).parent
+                if not parent.exists():
+                    self._path_warn.configure(text='上级目录不存在')
+                    return False
+                self._path_warn.configure(text='')
+                return True
+            except Exception:
+                self._path_warn.configure(text='路径无效')
+                return False
+        def _update_start_state(self):
+            ok = True
+            if self.agree_var is not None and not self.agree_var.get():
+                ok = False
+            if not self._validate_path():
+                ok = False
+            if ok:
+                self.start_btn.configure(state='normal')
+            else:
+                self.start_btn.configure(state='disabled')
 
-                runtime._extract_files(install_dir, silent=True, file_callback=file_cb)  # type: ignore[attr-defined]
-                if total_files == 0:
-                    gui.update_progress(0.80, "文件解压完成")
-                gui.update_progress(0.85, "执行脚本...")
-                runtime._run_scripts_simple(install_dir)  # type: ignore[attr-defined]
-                gui.update_progress(0.95, "脚本完成")
-                gui.update_progress(1.0, "安装完成")
-                gui.show_success()
-            except Exception as e:  # pragma: no cover
-                gui.show_error(str(e))
+        # ---------- External API & Actions ----------
+        def _browse(self):
+            if not self.allow_user_path: return
+            d = filedialog.askdirectory(initialdir=self.path_var.get()) if filedialog else None
+            if d: self.path_var.set(d)
+        def set_install_callback(self, cb:Callable[[str],Any]): self.install_callback = cb
+        def _start_install(self):
+            if self.agree_var is not None and not self.agree_var.get():
+                try: messagebox.showwarning('许可未同意','请先阅读并勾选“我已阅读并接受许可协议”以继续安装。')
+                except Exception: pass
+                return
+            if not self.install_callback: return
+            # 切换到进度界面
+            self._build_progress_view(); self._activate_step(0)  # 初始：即将进入解压
+            import threading
+            chosen = self.path_var.get()
+            cb = self.install_callback
+            if cb is not None:
+                threading.Thread(target=lambda: cb(chosen), daemon=True).start()
+        def _on_close(self): self.root.destroy(); self.cancelled = True
+        def run(self) -> bool: self.root.mainloop(); return not self.cancelled
 
-        gui.set_install_callback(install_callback)
-        result = gui.run()
-        return bool(result)
-    except Exception:
-        return False
+        # ---------- Progress / Logging (public) ----------
+        def update_progress(self, val:float, msg:str=''):
+            # 根据阶段： <0.05 仍在准备; 0.05-0.80 解压; 0.80-0.98 脚本; >=0.98 完成
+            step_idx = 0
+            if val >= 0.05: step_idx = 1
+            if val >= 0.80: step_idx = 2
+            if val >= 0.98: step_idx = 3
+            self._activate_step(step_idx)
+            if self._current_view != 'progress' and step_idx < 3:
+                # 若还未进入进度视图（例如后台直接调用），自动切换
+                self._build_progress_view()
+            try:
+                if hasattr(self, 'progress'):
+                    self.progress.set(max(0,min(1,val)))
+                    if hasattr(self, '_pb_label'):
+                        self._pb_label.configure(text=f"{int(val*100)}%")
+            except Exception:
+                pass
+            if msg:
+                self._append_log(msg)
+        def _append_log(self, msg:str):
+            # 线程安全追加
+            if self._current_view != 'progress':
+                self._log_buffer.append(msg)
+                return
+            def _do():
+                try:
+                    self.log.configure(state='normal'); self.log.insert('end', msg+'\n'); self.log.see('end'); self.log.configure(state='disabled')
+                except Exception:
+                    pass
+            try:
+                self.root.after(0, _do)
+            except Exception:
+                _do()
+        def show_success(self):
+            self._activate_step(3)
+            self._build_finish_view()
+        def show_error(self, msg:str):
+            self._append_log('错误: '+msg)
+            try: messagebox.showerror('错误', msg)
+            except Exception: pass
+        def show_cancelled(self):
+            # 仅在进度或欢迎状态下调用；构建一个简单提示
+            self._current_view='finish'; self._clear_main(); self._activate_step(3)
+            wrap = ctk.CTkFrame(self.main_container, fg_color=self._color('panel'), corner_radius=14)
+            wrap.pack(fill='both', expand=True, padx=22, pady=18)
+            ctk.CTkLabel(wrap, text='已取消', font=("Segoe UI", 22, 'bold'), text_color=self._color('danger')).pack(pady=(70,10))
+            ctk.CTkLabel(wrap, text='安装过程被用户取消。已写入的文件不会被自动回滚。', font=("Segoe UI", 14), text_color=self._color('subtext'), wraplength=520, justify='center').pack(pady=(0,30))
+            ctk.CTkButton(wrap, text='关闭', command=self._on_close, fg_color=self._color('primary'), hover_color=self._color('primary_hover'), width=180, height=42).pack()
+        def _on_cancel(self):
+            # GUI 只负责视觉反馈；实际取消由外部 runtime 轮询
+            try:
+                self.cancel_btn.configure(state='disabled', text='正在取消...')
+            except Exception:
+                pass
+            # 记录日志
+            self._append_log('收到取消请求，正在尝试停止...')
+            # 标记 GUI 自身取消，以便 run() 返回 False
+            self.cancelled = True
+else:
+    class _InstallerRuntimeGUIFallback:
+        def __init__(self, *a, **k):
+            raise ImportError('tkinter 不可用')
+        def set_install_callback(self, *_a, **_k): ...  # pragma: no cover
+        def update_progress(self, *_a, **_k): ...       # pragma: no cover
+        def run(self): return False                     # pragma: no cover
+    InstallerRuntimeGUI = _InstallerRuntimeGUIFallback  # type: ignore
 
-__all__ = [
-    "InstallerRuntime",
-    "InstallerRuntimeGUI",
-    "run_gui_installation",
-    "GUI_AVAILABLE",
-    "FOOTER_MAGIC",
-    "FOOTER_SIZE",
-]
+@runtime_checkable
+class _GUIProto(Protocol):
+    def update_progress(self, val:float, msg:str): ...
+    def _append_log(self, msg:str): ...
+    def set_install_callback(self, cb:Callable[[str],None]): ...
+    def run(self) -> bool: ...
 
-if __name__ == "__main__":  # pragma: no cover
-    import argparse
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--dir", type=str, default=None)
-    ns = ap.parse_args()
+def _read_license(path:Optional[str]) -> Optional[str]:
+    if not path:
+        return None
+    p = Path(path)
+    if not p.exists():
+        return None
+    for enc in ('utf-8', 'gbk'):
+        try:
+            return p.read_text(encoding=enc)
+        except Exception:
+            pass
+    return None
+
+def _count_files(h:Dict[str,Any]) -> int:
+    return sum(1 for f in h.get('files',[]) if isinstance(f, dict) and not f.get('is_directory', False))
+
+def _estimate_space(h:Dict[str,Any], clen:int) -> int:
+    total = sum(i.get('size',0) for i in h.get('files',[]) if isinstance(i, dict) and 'size' in i)
+    if total>0: return max(1, total//(1024*1024))
+    if clen: return max(1, int(clen*1.5/(1024*1024)))
+    return 200
+
+class InstallerRuntime:
+    def __init__(self, installer_path:Path, silent:bool=False):
+        self.installer_path = installer_path
+        self.header_data:Optional[Dict[str,Any]] = None
+        self.compressed_data:Optional[bytes] = None
+        self.silent = silent
+        self._parsed = False
+        self.cancel_requested = False
+    def request_cancel(self):
+        self.cancel_requested = True
+    def _parse(self):
+        if self._parsed: return
+        with open(self.installer_path, 'rb') as f:
+            f.seek(0,2); size = f.tell()
+            if size < FOOTER_SIZE: raise ValueError('文件太小')
+            f.seek(size-FOOTER_SIZE); footer = f.read(FOOTER_SIZE)
+            magic, hoff, hlen, coff, csz, _ = struct.unpack('<8sQQQQ32s', footer)
+            if magic != FOOTER_MAGIC: raise ValueError('无效 footer')
+            f.seek(hoff)
+            if struct.unpack('<Q', f.read(8))[0] != hlen: raise ValueError('头部长度不匹配')
+            header = f.read(hlen); self.header_data = json.loads(header.decode('utf-8'))
+            f.seek(coff); self.compressed_data = f.read(csz)
+            self._parsed = True
+    def _algo(self) -> str:
+        if not self.header_data: return 'zip'
+        return (self.header_data.get('compression') or {}).get('algo') or 'zip'
+    def _extract_zip(self, install_dir:Path, cb:Optional[Callable[[str],None]]):
+        assert self.compressed_data is not None
+        with zipfile.ZipFile(io.BytesIO(self.compressed_data), 'r') as zf:
+            for info in zf.infolist():
+                if self.cancel_requested: break
+                zf.extract(info, install_dir)
+                if not info.is_dir() and cb: cb(info.filename)
+    def _extract_zstd(self, install_dir:Path, cb:Optional[Callable[[str],None]]):
+        try: import zstandard as zstd
+        except ImportError: raise RuntimeError('缺少 zstandard')
+        assert self.compressed_data is not None
+        dctx = zstd.ZstdDecompressor()
+        with dctx.stream_reader(io.BytesIO(self.compressed_data)) as r:
+            while True:
+                h = r.read(4)
+                if not h: break
+                plen = int.from_bytes(h, 'little')
+                path = r.read(plen).decode('utf-8')
+                if self.cancel_requested: break
+                if cb: cb(path)
+                meta = r.read(17)
+                size, mtime, is_dir = struct.unpack('<QQB', meta)
+                tgt = install_dir/Path(path)
+                if is_dir: tgt.mkdir(parents=True, exist_ok=True); continue
+                tgt.parent.mkdir(parents=True, exist_ok=True)
+                with open(tgt, 'wb') as out:
+                    rem = size
+                    while rem>0:
+                        if self.cancel_requested: break
+                        chunk = r.read(min(64*1024, rem))
+                        if not chunk: break
+                        out.write(chunk); rem -= len(chunk)
+                try: os.utime(tgt, (mtime, mtime))
+                except: pass
+                if self.cancel_requested: break
+    def extract(self, install_dir:Path, cb:Optional[Callable[[str],None]]=None):
+        if not self.compressed_data: raise RuntimeError('无压缩数据')
+        if self._algo() == 'zstd': self._extract_zstd(install_dir, cb)
+        else: self._extract_zip(install_dir, cb)
+    def _get_scripts(self) -> List[Dict[str,Any]]:
+        return self.header_data.get('scripts', []) if self.header_data else []
+    def _run_scripts(self, install_dir:Path, cb:Optional[Callable[[str],None]]=None):
+        scripts = self._get_scripts(); si = None
+        if os.name == 'nt': si = subprocess.STARTUPINFO(); si.dwFlags |= subprocess.STARTF_USESHOWWINDOW; si.wShowWindow = subprocess.SW_HIDE
+        for s in scripts:
+            if self.cancel_requested:
+                if cb: cb('已取消：跳过后续脚本')
+                break
+            cmd = s.get('command')
+            if not cmd: continue
+            args = s.get('args') or []
+            try:
+                p = subprocess.Popen([cmd]+args, cwd=str(install_dir), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', startupinfo=si)
+                if p.stdout and cb:
+                    for line in iter(p.stdout.readline, ''):
+                        if self.cancel_requested:
+                            try: p.terminate()
+                            except Exception: pass
+                            if cb: cb('脚本执行已终止')
+                            break
+                        cb(line.rstrip('\n'))
+                p.wait(timeout=int(s.get('timeout_sec', 300)))
+            except Exception as e:
+                if cb: cb(f'SCRIPT ERROR: {e}')
+    def run_install(self, install_dir:Optional[str|Path]=None, gui:Optional[Any]=None, allow_user_path:Optional[bool]=None) -> bool:
+        try:
+            self._parse()
+            if not self.header_data: return False
+            # Determine install dir: priority: header.default_path > provided install_dir (if allowed) > fallback installed_app
+            header_install = (self.header_data or {}).get('install') or {}
+            header_default = header_install.get('default_path')
+            header_allow = header_install.get('allow_user_path') if 'allow_user_path' in header_install else None
+            if header_default:
+                install_dir = Path(header_default)
+            else:
+                if install_dir and (allow_user_path is not False):
+                    install_dir = Path(install_dir)
+                else:
+                    install_dir = Path.cwd()/"installed_app"
+            install_dir.mkdir(parents=True, exist_ok=True)
+            total = _count_files(self.header_data)
+            done = 0
+            def cb(pth:str):
+                nonlocal done
+                done += 1
+                if gui: gui.update_progress(0.05+0.75*(done/total if total else 1), f'解压 {done}/{total}: {pth}')
+            self.extract(install_dir, cb)
+            if self.cancel_requested:
+                if gui: gui.show_cancelled()
+                return False
+            if gui: gui.update_progress(0.85, '运行脚本')
+            self._run_scripts(install_dir, lambda t: gui._append_log(t) if gui else None)
+            if self.cancel_requested:
+                if gui: gui.show_cancelled()
+                return False
+            if gui: gui.update_progress(1.0, '完成'); gui.show_success()
+            return True
+        except Exception as e:
+            if gui: gui.show_error(str(e))
+            return False
+
+if __name__ == '__main__':
+    is_admin = lambda: ctypes.windll.shell32.IsUserAnAdmin() != 0 if os.name == 'nt' else True
+    def _elevate_and_exec(path: str, params: str, cwd: str) -> bool:
+        """Use ShellExecuteExW to elevate and run a process. Returns True if launched."""
+        try:
+            # Windows-only: prepare SHELLEXECUTEINFO structure
+            SEE_MASK_NOCLOSEPROCESS = 0x00000040
+            SW_SHOWNORMAL = 1
+            from ctypes import wintypes
+            class SHELLEXECUTEINFOW(ctypes.Structure):
+                _fields_ = [
+                    ("cbSize", wintypes.DWORD),
+                    ("fMask", wintypes.ULONG),
+                    ("hwnd", wintypes.HWND),
+                    ("lpVerb", wintypes.LPCWSTR),
+                    ("lpFile", wintypes.LPCWSTR),
+                    ("lpParameters", wintypes.LPCWSTR),
+                    ("lpDirectory", wintypes.LPCWSTR),
+                    ("nShow", ctypes.c_int),
+                    ("hInstApp", wintypes.HINSTANCE),
+                    ("lpIDList", ctypes.c_void_p),
+                    ("lpClass", wintypes.LPCWSTR),
+                    ("hkeyClass", wintypes.HKEY),
+                    ("dwHotKey", wintypes.DWORD),
+                    ("hIcon", wintypes.HANDLE),
+                    ("hProcess", wintypes.HANDLE),
+                ]
+            sei = SHELLEXECUTEINFOW()
+            sei.cbSize = ctypes.sizeof(sei)
+            sei.fMask = SEE_MASK_NOCLOSEPROCESS
+            sei.hwnd = None
+            sei.lpVerb = 'runas'
+            sei.lpFile = path
+            sei.lpParameters = params
+            sei.lpDirectory = cwd
+            sei.nShow = SW_SHOWNORMAL
+            # Call ShellExecuteExW
+            ok = ctypes.windll.shell32.ShellExecuteExW(ctypes.byref(sei))
+            if not ok:
+                return False
+            # Optionally wait a short time for the child process to be created
+            try:
+                # Wait 200ms for the child to start; do not block excessively
+                ctypes.windll.kernel32.WaitForSingleObject(sei.hProcess, 200)
+            except Exception:
+                pass
+            return True
+        except Exception:
+            return False
+
+    # Instantiate runtime early to inspect header and check whether admin is required
+    from pathlib import Path
     rt = InstallerRuntime(Path(sys.argv[0]))
-    ok = run_gui_installation(rt, ns.dir)
+    try:
+        rt._parse()
+    except Exception:
+        # ignore parse errors here; we'll handle later
+        pass
+    header_install = (rt.header_data or {}).get('install', {}) if rt.header_data else {}
+    require_admin = header_install.get('require_admin') if 'require_admin' in header_install else True
+    if os.name == 'nt' and require_admin and not is_admin():
+        argv0 = Path(sys.argv[0])
+        if argv0.suffix.lower() == '.exe' and argv0.exists():
+            exe_to_run = str(argv0)
+            params = ' '.join(['"' + a + '"' if ' ' in a else a for a in sys.argv[1:]])
+        else:
+            exe_to_run = sys.executable
+            params = '"' + str(argv0) + '"' + ((' ' + ' '.join(['"' + a + '"' if ' ' in a else a for a in sys.argv[1:]])) if len(sys.argv) > 1 else '')
+        cwd = os.getcwd()
+        launched = _elevate_and_exec(exe_to_run, params, cwd)
+        if launched:
+            # elevated child started, exit parent
+            sys.exit(0)
+        else:
+            # User declined elevation or elevation failed; if admin is required we must not continue
+            try:
+                # print to stderr; GUI not yet shown
+                print('需要管理员权限，用户拒绝或提升失败，安装已取消。', file=sys.stderr)
+            except Exception:
+                pass
+            sys.exit(2)
+    import argparse
+    p = argparse.ArgumentParser(); p.add_argument('--dir', type=str, default=None); p.add_argument('--cli', action='store_true')
+    a = p.parse_args(); rt = InstallerRuntime(Path(sys.argv[0])); ok = False
+    if not a.cli and GUI_AVAILABLE:
+        try:
+            rt._parse()
+        except:
+            pass
+        header_install = (rt.header_data or {}).get('install', {}) if rt.header_data else {}
+        license_file = header_install.get('license_file')
+        allow_user = header_install.get('allow_user_path') if 'allow_user_path' in header_install else True
+        lic = _read_license(license_file)
+        # Ensure header default_path is offered to GUI (and will be enforced by run_install)
+        header_default = header_install.get('default_path')
+        gui_default = header_default or (a.dir if a.dir else None)
+        icon_path = header_install.get('icon_path')
+        gui = InstallerRuntimeGUI(
+            app_name=(rt.header_data or {}).get('product', {}).get('name') if rt.header_data else '应用程序',
+            default_path=gui_default,
+            license_text=lic,
+            allow_user_path=bool(allow_user),
+            icon_path=icon_path,
+        )
+        # Callback should respect header allow_user_path
+        gui.set_install_callback(lambda d: rt.run_install(d, gui, allow_user_path=bool(allow_user)))
+        # 将 GUI 的取消意图传递给 runtime（通过轮询标志实现软中断）
+        def _poll_cancel():
+            # 若 GUI 标记了 cancelled 且 runtime 未设置取消，则发出 request_cancel
+            try:
+                if gui.cancelled and not rt.cancel_requested:
+                    rt.request_cancel()
+                if not gui.cancelled and not rt.cancel_requested:
+                    # 继续轮询直到安装完成或设置 cancelled
+                    gui.root.after(300, _poll_cancel)
+            except Exception:
+                pass
+        try:
+            gui.root.after(300, _poll_cancel)
+        except Exception:
+            pass
+        ok = gui.run()
+    if not ok:
+        ok = rt.run_install(a.dir, None)
     sys.exit(0 if ok else 2)
