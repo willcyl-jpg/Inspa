@@ -37,7 +37,7 @@ class StubCompilationStep(BuildStep):
                 progress_start, progress_end = self.get_progress_range()
                 context.progress_callback("组装文件", progress_start, 100, "生成 Runtime Stub...")
 
-            stub_data = self._get_runtime_stub(context.config)
+            stub_data = self._get_runtime_stub(context)
             context.stub_data = stub_data
 
             if context.progress_callback:
@@ -49,21 +49,14 @@ class StubCompilationStep(BuildStep):
             error(f"详细错误信息:\n{traceback.format_exc()}")
             raise BuildError(f"无法获取 Runtime Stub: {e}")
 
-    def _get_runtime_stub(self, config) -> bytes:
+    def _get_runtime_stub(self, context) -> bytes:
         """获取 Runtime Stub 数据"""
+        config = context.config
         need_custom = bool(config.install.icon_path)
         # 版本信息始终需要注入
         need_custom = True  # 直接强制动态编译以便写入版本信息和图标
 
         try:
-            # 测试模式快速路径
-            import os
-            if os.environ.get('INSPA_TEST_MODE') == '1':
-                info("检测到测试模式，使用内置伪 stub", stage=LogStage.STUB)
-                dummy = b'MZ' + b'\x00' * 58  # 最小 DOS 头 (不可执行但占位) 60字节
-                success(f"测试模式 stub 准备完成 - 大小: {len(dummy)}B", stage=LogStage.STUB)
-                return dummy
-
             # 首先尝试使用预编译的 stub
             if not need_custom:
                 stub_path = Path(__file__).parent.parent / "runtime_stub" / "dist" / "stub.exe"
@@ -75,7 +68,7 @@ class StubCompilationStep(BuildStep):
 
             # 如果没有预编译版本或需要定制，动态编译
             info("使用动态编译 Runtime Stub 以注入版本信息和图标", stage=LogStage.STUB)
-            stub_data = self._compile_runtime_stub(config)
+            stub_data = self._compile_runtime_stub(context)
             success(f"Runtime Stub准备完成 - 大小: {format_size(len(stub_data))}", stage=LogStage.STUB)
             return stub_data
 
@@ -83,12 +76,13 @@ class StubCompilationStep(BuildStep):
             error(f"获取Runtime Stub失败: {e}", stage=LogStage.STUB)
             raise
 
-    def _compile_runtime_stub(self, config) -> bytes:
+    def _compile_runtime_stub(self, context) -> bytes:
         """动态编译 Runtime Stub"""
         import subprocess
         import tempfile
         import importlib
 
+        config = context.config
         info("开始编译Runtime Stub", stage=LogStage.STUB)
         runtime_stub_dir = Path(__file__).parent.parent.parent / "runtime_stub"
         main_py = runtime_stub_dir / "installer.py"
@@ -103,14 +97,14 @@ class StubCompilationStep(BuildStep):
         if not main_py.exists():
             raise BuildError(f"Runtime stub 源文件不存在: {main_py}")
 
-        # 缺少 PyInstaller -> 占位 stub
+        # 检查 PyInstaller 可用性
         try:
             importlib.import_module("PyInstaller")  # noqa: F401
-        except ImportError:
-            info("未检测到 PyInstaller, 使用占位 stub (测试/快速模式)", stage=LogStage.STUB)
-            dummy = b"MZ" + b"\x00" * 58
-            success(f"占位 stub 准备完成 - 大小: {len(dummy)}B", stage=LogStage.STUB)
-            return dummy
+        except ImportError as e:
+            raise BuildError(
+                f"PyInstaller 未安装或不可用: {e}\n"
+                "请运行以下命令安装: pip install pyinstaller>=6.0.0"
+            ) from e
 
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -120,6 +114,10 @@ class StubCompilationStep(BuildStep):
                 # 生成版本信息文件
                 version_file = temp_path / "version_info.txt"
                 version_info = config.get_version_info()
+
+                # 根据输出文件名更新 OriginalFilename
+                if context.output_path:
+                    version_info['OriginalFilename'] = context.output_path.name
                 def split_ver(v: str) -> str:
                     parts = [p for p in v.split('-')[0].split('.')][:4]
                     while len(parts) < 4:
@@ -273,7 +271,7 @@ class StubCompilationStep(BuildStep):
                 raise BuildError(f"编译 Runtime Stub 失败: {e}")
 
     def _modify_spec_content(self, spec_content: str, version_file: Path, config, script_path: Optional[Path] = None) -> str:
-        """修改spec文件内容，添加version和icon信息"""
+        """修改spec文件内容，添加version、icon和UAC信息"""
         import re
 
         modified_content = spec_content
@@ -310,20 +308,49 @@ class StubCompilationStep(BuildStep):
         if config.install.icon_path:
             icon_path = str(config.install.icon_path)
             if 'icon=' in modified_content:
-                # 如果已有icon，替换它
-                modified_content = re.sub(r"icon=r?'[^']*'", f"icon=r'{re.escape(str(icon_path))}'", modified_content)
+                # 如果已有icon，替换它 - 匹配各种格式：icon=None, icon=r'path', icon='path'
+                def replace_icon(match):
+                    return f"icon=r'{icon_path}'"
+                modified_content = re.sub(
+                    r"icon\s*=\s*[^,\)\n]*",
+                    replace_icon,
+                    modified_content
+                )
             else:
                 # 添加icon参数到EXE调用
                 exe_pattern = r'(exe = EXE\(\s*pyz,\s*a\.scripts,\s*a\.binaries,\s*a\.zipfiles,\s*a\.datas,)'
-                icon_param = f"icon=r'{str(icon_path)}',"
-
                 def add_icon(match):
-                    return match.group(1) + f'\n    {icon_param}'
+                    return match.group(1) + f'\n    icon=r\'{icon_path}\','
 
                 modified_content = re.sub(exe_pattern, add_icon, modified_content, flags=re.DOTALL)
 
                 # 如果没有找到EXE模式，在文件末尾添加icon参数
                 if 'icon=' not in modified_content:
-                    modified_content = modified_content.replace(')', f',\n    {icon_param}\n)')
+                    modified_content = modified_content.replace(')', f',\n    icon=r\'{icon_path}\'\n)')
+
+        # 添加UAC提权参数（如果配置中需要管理员权限）
+        # 注意：不设置uac_admin=True以避免exe显示盾牌图标
+        # UAC提权将在运行时通过manifest或其他方式处理
+        # if config.install.require_admin:
+        #     if 'uac_admin=' in modified_content:
+        #         # 如果已有uac_admin，替换它
+        #         def replace_uac(match):
+        #             return "uac_admin=True"
+        #         modified_content = re.sub(
+        #             r"uac_admin\s*=\s*[^,\)\n]*",
+        #             replace_uac,
+        #             modified_content
+        #         )
+        #     else:
+        #         # 添加uac_admin参数到EXE调用
+        #         exe_pattern = r'(exe = EXE\(\s*pyz,\s*a\.scripts,\s*a\.binaries,\s*a\.zipfiles,\s*a\.datas,)'
+        #         def add_uac(match):
+        #             return match.group(1) + '\n    uac_admin=True,'
+        #
+        #         modified_content = re.sub(exe_pattern, add_uac, modified_content, flags=re.DOTALL)
+        #
+        #         # 如果没有找到EXE模式，在文件末尾添加uac_admin参数
+        #         if 'uac_admin=' not in modified_content:
+        #             modified_content = modified_content.replace(')', '\n    uac_admin=True\n)')
 
         return modified_content

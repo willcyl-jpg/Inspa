@@ -406,7 +406,7 @@ class HeaderBuilder:
     
     def _build_install_info(self, config: InspaConfig) -> Dict[str, Any]:
         """构建安装信息"""
-        return {
+        install_info = {
             'default_path': config.install.default_path,
             'allow_user_path': config.install.allow_user_path,
             'force_hidden_path': config.install.force_hidden_path,
@@ -416,6 +416,33 @@ class HeaderBuilder:
             'privacy_file': str(config.install.privacy_file) if config.install.privacy_file else None,
             'icon_path': str(config.install.icon_path) if config.install.icon_path else None,
         }
+        
+        # 如果有license文件，读取其内容并嵌入到header中
+        if config.install.license_file:
+            license_path = Path(config.install.license_file)
+            if license_path.exists():
+                try:
+                    # 尝试不同的编码方式读取license文件
+                    license_content = None
+                    for encoding in ['utf-8', 'gbk', 'utf-16']:
+                        try:
+                            license_content = license_path.read_text(encoding=encoding)
+                            break
+                        except UnicodeDecodeError:
+                            continue
+                    
+                    if license_content is not None:
+                        install_info['license_content'] = license_content
+                        logger = get_stage_logger(LogStage.HEADER)
+                        logger.debug("已嵌入license文件内容", file=str(license_path))
+                    else:
+                        logger = get_stage_logger(LogStage.HEADER)
+                        logger.warning("无法读取license文件内容", file=str(license_path))
+                except Exception as e:
+                    logger = get_stage_logger(LogStage.HEADER)
+                    logger.warning("读取license文件失败", file=str(license_path), error=str(e))
+        
+        return install_info
     
     def _build_compression_info(self, config: InspaConfig, actual_algo: CompressionAlgorithm) -> Dict[str, Any]:
         """构建压缩信息"""

@@ -7,6 +7,7 @@
 
 import io
 import zipfile
+import os
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import BinaryIO, Iterator, Optional, Protocol, Tuple
@@ -120,40 +121,42 @@ class ZstdCompressor(Compressor):
     ) -> int:
         """使用 Zstd 压缩文件"""
         try:
-            total_bytes = 0
+            # 分离文件和目录
+            file_entries = [f for f in files if not f.is_directory]
+            dir_entries = [f for f in files if f.is_directory]
+            
+            total_bytes = sum(f.size for f in file_entries)
             processed_bytes = 0
             
-            # 计算总字节数
-            total_bytes = sum(f.size for f in files if not f.is_directory)
-            
             with self._cctx.stream_writer(output_stream, closefd=False) as writer:
-                for file_info in files:
-                    if file_info.is_directory:
-                        # 目录条目（只记录结构）
-                        self._write_directory_entry(writer, file_info)
-                        continue
-                    
-                    # 回调进度
+                # 先写入目录条目
+                for dir_info in dir_entries:
+                    self._write_directory_entry(writer, dir_info)
+                
+                # 按顺序写入文件
+                for file_info in file_entries:
+                    # 更新进度
                     if progress_callback:
                         progress_callback(processed_bytes, total_bytes, str(file_info.relative_path))
                     
                     # 写入文件头
                     self._write_file_header(writer, file_info)
                     
-                    # 写入文件内容
+                    # 读取并写入文件内容
                     try:
                         with open(file_info.path, 'rb') as f:
                             while True:
-                                chunk = f.read(64 * 1024)  # 64KB 块
+                                chunk = f.read(64 * 1024)
                                 if not chunk:
                                     break
                                 writer.write(chunk)
                     except (OSError, IOError) as e:
                         raise CompressionError(f"读取文件失败 {file_info.path}: {e}")
                     
+                    # 更新已处理字节数
                     processed_bytes += file_info.size
             
-            return output_stream.tell() if hasattr(output_stream, 'tell') else processed_bytes
+            return output_stream.tell() if hasattr(output_stream, 'tell') else total_bytes
             
         except Exception as e:
             if isinstance(e, CompressionError):
@@ -290,30 +293,39 @@ class ZipCompressor(Compressor):
     ) -> int:
         """使用 Zip 压缩文件"""
         try:
-            total_bytes = sum(f.size for f in files if not f.is_directory)
+            # 分离文件和目录
+            file_entries = [f for f in files if not f.is_directory]
+            dir_entries = [f for f in files if f.is_directory]
+            
+            total_bytes = sum(f.size for f in file_entries)
             processed_bytes = 0
             
             with zipfile.ZipFile(output_stream, 'w', zipfile.ZIP_DEFLATED, compresslevel=self.level) as zf:
-                for file_info in files:
+                # 先添加目录条目
+                for dir_info in dir_entries:
+                    if progress_callback:
+                        progress_callback(processed_bytes, total_bytes, str(dir_info.relative_path))
+                    
+                    archive_path = str(dir_info.relative_path).replace('\\', '/')
+                    if not archive_path.endswith('/'):
+                        archive_path += '/'
+                    zf.writestr(zipfile.ZipInfo(archive_path), '')
+                
+                # 按顺序添加文件
+                for file_info in file_entries:
                     if progress_callback:
                         progress_callback(processed_bytes, total_bytes, str(file_info.relative_path))
                     
                     archive_path = str(file_info.relative_path).replace('\\', '/')
                     
-                    if file_info.is_directory:
-                        # 添加目录条目
-                        if not archive_path.endswith('/'):
-                            archive_path += '/'
-                        zf.writestr(zipfile.ZipInfo(archive_path), '')
-                    else:
-                        # 添加文件
-                        try:
-                            zf.write(file_info.path, archive_path)
-                            processed_bytes += file_info.size
-                        except (OSError, IOError) as e:
-                            raise CompressionError(f"添加文件到 Zip 失败 {file_info.path}: {e}")
+                    try:
+                        # 直接从文件路径写入，避免内存问题
+                        zf.write(str(file_info.path), archive_path)
+                        processed_bytes += file_info.size
+                    except Exception as e:
+                        raise CompressionError(f"添加文件到 Zip 失败 {file_info.path}: {e}")
             
-            return output_stream.tell() if hasattr(output_stream, 'tell') else processed_bytes
+            return output_stream.tell() if hasattr(output_stream, 'tell') else total_bytes
             
         except Exception as e:
             if isinstance(e, CompressionError):

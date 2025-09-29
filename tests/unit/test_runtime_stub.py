@@ -308,6 +308,67 @@ class TestInstallerRuntime:
         # 应该只处理第一个脚本，然后停止
         assert len([line for line in log_output if '已取消' in line]) > 0
 
+    def test_run_install_cancelled_deletes_files(self, tmp_path):
+        """测试取消安装时会删除已安装的文件"""
+        # 创建模拟的安装器文件
+        installer_file = tmp_path / "installer.exe"
+        installer_file.write_bytes(b"dummy installer content")
+
+        # 创建模拟的压缩数据（简单的ZIP格式）
+        import zipfile
+        import io
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, 'w') as zf:
+            zf.writestr('test_file.txt', 'test content')
+            zf.writestr('subdir/test_file2.txt', 'test content 2')
+        compressed_data = zip_buffer.getvalue()
+
+        # 创建模拟的header数据
+        header_data = {
+            'files': [
+                {'path': 'test_file.txt', 'size': 12, 'is_directory': False},
+                {'path': 'subdir', 'is_directory': True},
+                {'path': 'subdir/test_file2.txt', 'size': 14, 'is_directory': False}
+            ],
+            'compression': {'algo': 'zip'},
+            'install': {'default_path': str(tmp_path / "install_target")}
+        }
+
+        # 创建footer数据
+        footer_magic = b"INSPAF01"
+        header_json = json.dumps(header_data).encode('utf-8')
+        header_len = len(header_json)
+        compressed_offset = 8 + header_len  # 8字节长度前缀
+        footer = struct.pack('<8sQQQQ32s',
+                           footer_magic,
+                           8,  # header offset
+                           header_len,
+                           compressed_offset,
+                           len(compressed_data),
+                           b'\x00' * 32)
+
+        # 组合完整的安装器文件
+        with open(installer_file, 'wb') as f:
+            f.write(b'dummy header')  # 模拟header
+            f.write(struct.pack('<Q', header_len))  # header长度
+            f.write(header_json)  # header数据
+            f.write(compressed_data)  # 压缩数据
+            f.write(footer)  # footer
+
+        # 创建runtime实例
+        runtime = InstallerRuntime(installer_file)
+        runtime.cancel_requested = True  # 设置取消标志
+
+        # 运行安装
+        install_dir = tmp_path / "install_target"
+        result = runtime.run_install(install_dir)
+
+        # 验证安装失败
+        assert result is False
+
+        # 验证安装目录被删除
+        assert not install_dir.exists()
+
 
 class TestUtilityFunctions:
     """工具函数测试"""

@@ -32,6 +32,7 @@ dependencies = [
     "customtkinter>=5.2.0",
     "pillow>=10.0.0",
     "colorama>=0.4.6",
+    "pyinstaller>=6.0.0",
 ]
 
 [project.optional-dependencies]
@@ -45,7 +46,6 @@ dev = [
     "pre-commit>=3.6.0",
 ]
 build = [
-    "pyinstaller>=6.0.0",
     "upx-windows-amd64>=4.2.1",
 ]
 

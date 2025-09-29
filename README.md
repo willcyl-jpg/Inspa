@@ -13,7 +13,7 @@
 - 环境变量设置：支持 PATH 追加与系统级（自动推断管理员权限）
 - 可选静默模式：`/S` 或配置允许时自动无界面安装
 - Hash 校验：归档 SHA-256 + Footer 存档结构信息保证完整性
-- 动态 Stub：按需 PyInstaller 编译（含版本信息、图标、UAC）或测试占位
+- 动态 Stub：按需 PyInstaller 编译（含版本信息、图标、UAC）
 
 ## 🧱 架构概览
 
@@ -49,6 +49,12 @@ pip install .
 
 ```bash
 pip install -e ".[dev]"
+```
+
+**注意**: 构建功能需要 PyInstaller：
+
+```bash
+pip install pyinstaller>=6.0.0
 ```
 
 ## 🚀 快速上手
@@ -229,13 +235,6 @@ isort inspa/ tests/
 mypy inspa/
 pytest -q
 ```
-
-## 🧩 测试模式
-
-设置 `INSPA_TEST_MODE=1` 时：
-
-- 使用最小占位 Stub (避免 PyInstaller 构建耗时)
-- 加速单元测试；仍验证 Footer/解析/解压逻辑
 
 ## 🖥 GUI 构建器
 

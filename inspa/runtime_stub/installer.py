@@ -322,7 +322,7 @@ if GUI_AVAILABLE and ctk:
             wrap = ctk.CTkFrame(self.main_container, fg_color=self._color('panel'), corner_radius=14)
             wrap.pack(fill='both', expand=True, padx=22, pady=18)
             ctk.CTkLabel(wrap, text='已取消', font=("Segoe UI", 22, 'bold'), text_color=self._color('danger')).pack(pady=(70,10))
-            ctk.CTkLabel(wrap, text='安装过程被用户取消。已写入的文件不会被自动回滚。', font=("Segoe UI", 14), text_color=self._color('subtext'), wraplength=520, justify='center').pack(pady=(0,30))
+            ctk.CTkLabel(wrap, text='安装过程被用户取消，已删除所有已安装的文件。', font=("Segoe UI", 14), text_color=self._color('subtext'), wraplength=520, justify='center').pack(pady=(0,30))
             ctk.CTkButton(wrap, text='关闭', command=self._on_close, fg_color=self._color('primary'), hover_color=self._color('primary_hover'), width=180, height=42).pack()
         def _on_cancel(self):
             # GUI 只负责视觉反馈；实际取消由外部 runtime 轮询
@@ -359,6 +359,42 @@ def _read_license(path:Optional[str]) -> Optional[str]:
     for enc in ('utf-8', 'gbk'):
         try:
             return p.read_text(encoding=enc)
+        except Exception:
+            pass
+    return None
+
+def _read_license_from_install_dir(install_dir: Path, license_file: Optional[str]) -> Optional[str]:
+    """从安装目录读取许可证文件
+    
+    Args:
+        install_dir: 安装目录
+        license_file: 许可证文件名（相对于安装目录）
+        
+    Returns:
+        Optional[str]: 许可证内容，如果读取失败返回 None
+    """
+    if not license_file:
+        return None
+    
+    # 如果是绝对路径，尝试直接读取（向后兼容）
+    license_path = Path(license_file)
+    if license_path.is_absolute():
+        if license_path.exists():
+            for enc in ('utf-8', 'gbk'):
+                try:
+                    return license_path.read_text(encoding=enc)
+                except Exception:
+                    pass
+        return None
+    
+    # 相对路径：相对于安装目录
+    full_path = install_dir / license_file
+    if not full_path.exists():
+        return None
+        
+    for enc in ('utf-8', 'gbk'):
+        try:
+            return full_path.read_text(encoding=enc)
         except Exception:
             pass
     return None
@@ -403,15 +439,68 @@ class InstallerRuntime:
     def _extract_zip(self, install_dir:Path, cb:Optional[Callable[[str],None]]):
         assert self.compressed_data is not None
         with zipfile.ZipFile(io.BytesIO(self.compressed_data), 'r') as zf:
+            # 预创建所有目录结构以提高性能
+            dirs_created = set()
+            for info in zf.infolist():
+                if info.is_dir():
+                    target_dir = install_dir / info.filename.rstrip('/')
+                    if str(target_dir) not in dirs_created:
+                        target_dir.mkdir(parents=True, exist_ok=True)
+                        dirs_created.add(str(target_dir))
+                else:
+                    # 确保文件父目录存在
+                    target_file = install_dir / info.filename
+                    target_file.parent.mkdir(parents=True, exist_ok=True)
+            
+            # 解压文件，使用更大的缓冲区
             for info in zf.infolist():
                 if self.cancel_requested: break
-                zf.extract(info, install_dir)
+                if not info.is_dir():
+                    target_path = install_dir / info.filename
+                    with open(target_path, 'wb') as f:
+                        with zf.open(info) as src:
+                            while True:
+                                if self.cancel_requested: break
+                                chunk = src.read(256*1024)  # 256KB 缓冲区
+                                if not chunk: break
+                                f.write(chunk)
+                    # 设置文件时间
+                    try:
+                        import time
+                        mtime = time.mktime(info.date_time + (0, 0, -1))
+                        os.utime(target_path, (mtime, mtime))
+                    except: pass
                 if not info.is_dir() and cb: cb(info.filename)
     def _extract_zstd(self, install_dir:Path, cb:Optional[Callable[[str],None]]):
         try: import zstandard as zstd
         except ImportError: raise RuntimeError('缺少 zstandard')
         assert self.compressed_data is not None
         dctx = zstd.ZstdDecompressor()
+        
+        # 第一遍：收集所有目录并预创建
+        dirs_created = set()
+        with dctx.stream_reader(io.BytesIO(self.compressed_data)) as r:
+            while True:
+                h = r.read(4)
+                if not h: break
+                plen = int.from_bytes(h, 'little')
+                path = r.read(plen).decode('utf-8')
+                meta = r.read(17)
+                size, mtime, is_dir = struct.unpack('<QQB', meta)
+                if is_dir:
+                    target_dir = install_dir / path
+                    if str(target_dir) not in dirs_created:
+                        target_dir.mkdir(parents=True, exist_ok=True)
+                        dirs_created.add(str(target_dir))
+                else:
+                    # 预创建文件父目录
+                    target_file = install_dir / path
+                    target_file.parent.mkdir(parents=True, exist_ok=True)
+                # 跳过文件内容（如果不是目录）
+                if not is_dir:
+                    r.read(size)
+        
+        # 第二遍：解压文件，使用更大的缓冲区
         with dctx.stream_reader(io.BytesIO(self.compressed_data)) as r:
             while True:
                 h = r.read(4)
@@ -423,18 +512,75 @@ class InstallerRuntime:
                 meta = r.read(17)
                 size, mtime, is_dir = struct.unpack('<QQB', meta)
                 tgt = install_dir/Path(path)
-                if is_dir: tgt.mkdir(parents=True, exist_ok=True); continue
-                tgt.parent.mkdir(parents=True, exist_ok=True)
+                if is_dir: continue  # 目录已创建
                 with open(tgt, 'wb') as out:
                     rem = size
                     while rem>0:
                         if self.cancel_requested: break
-                        chunk = r.read(min(64*1024, rem))
+                        chunk = r.read(min(256*1024, rem))  # 增加到256KB缓冲区
                         if not chunk: break
                         out.write(chunk); rem -= len(chunk)
                 try: os.utime(tgt, (mtime, mtime))
                 except: pass
                 if self.cancel_requested: break
+    def _extract_zip_single_file(self, install_dir: Path, target_file: str):
+        """只提取指定的单个文件"""
+        assert self.compressed_data is not None
+        with zipfile.ZipFile(io.BytesIO(self.compressed_data), 'r') as zf:
+            for info in zf.infolist():
+                if info.filename == target_file and not info.is_dir():
+                    target_path = install_dir / info.filename
+                    target_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(target_path, 'wb') as f:
+                        with zf.open(info) as src:
+                            while True:
+                                chunk = src.read(256*1024)  # 256KB 缓冲区
+                                if not chunk: break
+                                f.write(chunk)
+                    # 设置文件时间
+                    try:
+                        import time
+                        mtime = time.mktime(info.date_time + (0, 0, -1))
+                        os.utime(target_path, (mtime, mtime))
+                    except: pass
+                    break
+    
+    def _extract_zstd_single_file(self, install_dir: Path, target_file: str):
+        """只提取指定的单个 Zstd 文件"""
+        try: import zstandard as zstd
+        except ImportError: raise RuntimeError('缺少 zstandard')
+        assert self.compressed_data is not None
+        dctx = zstd.ZstdDecompressor()
+        with dctx.stream_reader(io.BytesIO(self.compressed_data)) as r:
+            while True:
+                h = r.read(4)
+                if not h: break
+                plen = int.from_bytes(h, 'little')
+                path = r.read(plen).decode('utf-8')
+                if path == target_file:
+                    # 找到了目标文件，提取它
+                    meta = r.read(17)
+                    size, mtime, is_dir = struct.unpack('<QQB', meta)
+                    if not is_dir:
+                        tgt = install_dir / Path(path)
+                        tgt.parent.mkdir(parents=True, exist_ok=True)
+                        with open(tgt, 'wb') as out:
+                            rem = size
+                            while rem > 0:
+                                chunk = r.read(min(256*1024, rem))  # 增加到256KB缓冲区
+                                if not chunk: break
+                                out.write(chunk)
+                                rem -= len(chunk)
+                        try: os.utime(tgt, (mtime, mtime))
+                        except: pass
+                    break
+                else:
+                    # 跳过这个文件
+                    meta = r.read(17)
+                    size, mtime, is_dir = struct.unpack('<QQB', meta)
+                    if not is_dir:
+                        r.read(size)  # 跳过文件内容
+    
     def extract(self, install_dir:Path, cb:Optional[Callable[[str],None]]=None):
         if not self.compressed_data: raise RuntimeError('无压缩数据')
         if self._algo() == 'zstd': self._extract_zstd(install_dir, cb)
@@ -488,11 +634,27 @@ class InstallerRuntime:
                 if gui: gui.update_progress(0.05+0.75*(done/total if total else 1), f'解压 {done}/{total}: {pth}')
             self.extract(install_dir, cb)
             if self.cancel_requested:
+                # 强行删除已安装的文件
+                if gui: gui._append_log('正在删除已安装的文件...')
+                try:
+                    import shutil
+                    shutil.rmtree(install_dir, ignore_errors=True)
+                    if gui: gui._append_log('已删除安装目录')
+                except Exception as e:
+                    if gui: gui._append_log(f'删除文件时出错: {e}')
                 if gui: gui.show_cancelled()
                 return False
             if gui: gui.update_progress(0.85, '运行脚本')
             self._run_scripts(install_dir, lambda t: gui._append_log(t) if gui else None)
             if self.cancel_requested:
+                # 强行删除已安装的文件
+                if gui: gui._append_log('正在删除已安装的文件...')
+                try:
+                    import shutil
+                    shutil.rmtree(install_dir, ignore_errors=True)
+                    if gui: gui._append_log('已删除安装目录')
+                except Exception as e:
+                    if gui: gui._append_log(f'删除文件时出错: {e}')
                 if gui: gui.show_cancelled()
                 return False
             if gui: gui.update_progress(1.0, '完成'); gui.show_success()
@@ -595,7 +757,35 @@ if __name__ == '__main__':
         header_install = (rt.header_data or {}).get('install', {}) if rt.header_data else {}
         license_file = header_install.get('license_file')
         allow_user = header_install.get('allow_user_path') if 'allow_user_path' in header_install else True
-        lic = _read_license(license_file)
+        
+        # 读取许可证内容
+        lic = None
+        if license_file:
+            # 首先尝试从header中获取嵌入的license内容
+            header_install = (rt.header_data or {}).get('install', {})
+            lic = header_install.get('license_content')
+            
+            if not lic:
+                # 如果header中没有嵌入的内容，则尝试从压缩数据中提取
+                license_path = Path(license_file)
+                if not license_path.is_absolute():
+                    # 临时解压许可证文件
+                    import tempfile
+                    import shutil
+                    with tempfile.TemporaryDirectory() as temp_dir:
+                        temp_path = Path(temp_dir)
+                        try:
+                            # 只解压许可证文件
+                            if rt._algo() == 'zstd':
+                                rt._extract_zstd_single_file(temp_path, license_file)
+                            else:
+                                rt._extract_zip_single_file(temp_path, license_file)
+                            lic = _read_license_from_install_dir(temp_path, license_file)
+                        except Exception as e:
+                            print(f"读取许可证文件失败: {e}", file=sys.stderr)
+                else:
+                    # 绝对路径，直接读取（向后兼容）
+                    lic = _read_license(str(license_path))
         # Ensure header default_path is offered to GUI (and will be enforced by run_install)
         header_default = header_install.get('default_path')
         gui_default = header_default or (a.dir if a.dir else None)

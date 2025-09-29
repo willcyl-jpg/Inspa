@@ -23,7 +23,6 @@ from inspa.config.schema import (
     InstallModel,
     PostActionModel,
     ProductModel,
-    ResourcesModel,
     RunCondition,
     ScriptType,
     UIModel,
@@ -74,13 +73,7 @@ class TestInstallModel:
 
     def test_valid_install_model(self):
         """测试有效的安装模型"""
-        install = InstallModel(
-            default_path="C:/Program Files/TestApp",
-            allow_user_path=True,
-            force_hidden_path=False,
-            silent_allowed=True,
-            require_admin=False
-        )
+        install = InstallModel(default_path="C:/Program Files/TestApp")
         assert install.default_path == "C:/Program Files/TestApp"
 
     def test_path_validation(self):
@@ -255,10 +248,10 @@ class TestInspaConfig:
             install=InstallModel(
                 default_path="C:/Program Files/TestApp",
                 allow_user_path=True,
-                require_admin=True
+                require_admin=True,
+                icon_path="icon.ico"
             ),
             inputs=[InputPathModel(path="C:/source")],
-            resources=ResourcesModel(icon="icon.ico"),
             ui=UIModel(theme="github-light"),
             compression=CompressionModel(algo=CompressionAlgorithm.ZSTD, level=10),
             exclude=["*.tmp", "*.log"],
@@ -270,7 +263,7 @@ class TestInspaConfig:
             ],
             env=EnvironmentModel(add_path=["C:/bin"])
         )
-        assert config.install.icon_path == Path("icon.ico")
+        assert config.install.icon_path == "icon.ico"
         assert config.compression.algo == CompressionAlgorithm.ZSTD
         assert len(config.post_actions) == 1
 
