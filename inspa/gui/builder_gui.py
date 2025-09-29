@@ -170,8 +170,8 @@ if GUI_AVAILABLE and ctk is not None:
                 page_container = ctk.CTkScrollableFrame(self.main_frame, fg_color=Colors.BACKGROUND, corner_radius=0)
                 page_container.grid(row=0, column=0, sticky="nsew", padx=20, pady=20)
                 
+                # 创建页面实例并直接添加到容器中
                 page_instance = PageClass(page_container, self)
-                page_instance.pack(fill="both", expand=True)
                 
                 self._page_containers[key] = page_container
                 self._page_instances[key] = page_instance
@@ -225,9 +225,14 @@ if GUI_AVAILABLE and ctk is not None:
 
         def _show_page(self, key_to_show: str):
             """显示指定的页面"""
+            # 隐藏所有页面
+            for container in self._page_containers.values():
+                container.grid_remove()
+            
+            # 显示选中的页面
             page_container = self._page_containers.get(key_to_show)
             if page_container:
-                page_container.tkraise()
+                page_container.grid(row=0, column=0, sticky="nsew", padx=20, pady=20)
                 self._active_page_key = key_to_show
 
             # 更新导航按钮状态

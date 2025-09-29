@@ -369,7 +369,9 @@ def _count_files(h:Dict[str,Any]) -> int:
 def _estimate_space(h:Dict[str,Any], clen:int) -> int:
     total = sum(i.get('size',0) for i in h.get('files',[]) if isinstance(i, dict) and 'size' in i)
     if total>0: return max(1, total//(1024*1024))
-    if clen: return max(1, int(clen*1.5/(1024*1024)))
+    if clen: 
+        import math
+        return max(1, math.ceil(clen*1.5/(1024*1024)))
     return 200
 
 class InstallerRuntime:

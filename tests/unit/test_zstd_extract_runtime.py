@@ -69,7 +69,7 @@ def test_zstd_build_and_parse(tmp_path: Path):
 
     # runtime extraction using unified runtime_stub (gui.py backend)
     runtime = InstallerRuntime(out, silent=True)
-    ok = runtime.run_installation(silent=True)
+    ok = runtime.run_install()
     assert ok, 'runtime extraction failed'
     # 运行时安装目录逻辑: 默认当前目录 / installed_app 或 header 中 default_path
     default_path = header.get('install', {}).get('default_path')

@@ -2,7 +2,7 @@
 
 此包已合并为单文件实现: `installer.py`，包含:
  - InstallerRuntime (核心逻辑)
- - run_gui_installation / InstallerRuntimeGUI (可选 GUI)
+ - InstallerRuntimeGUI (可选 GUI)
 
 外部使用保持不变::
 
@@ -13,15 +13,15 @@
 
 from .installer import (  # noqa: F401
 	InstallerRuntime,
+	InstallerRuntimeGUI,
 	GUI_AVAILABLE,
-	run_gui_installation,
 	FOOTER_MAGIC,
 	FOOTER_SIZE,
 )
 
 __all__ = [
 	"InstallerRuntime",
-	"run_gui_installation",
+	"InstallerRuntimeGUI",
 	"GUI_AVAILABLE",
 	"FOOTER_MAGIC",
 	"FOOTER_SIZE",

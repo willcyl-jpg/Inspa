@@ -141,16 +141,15 @@ class ZstdCompressor(Compressor):
                     self._write_file_header(writer, file_info)
                     
                     # 写入文件内容
-                    if file_info.path.exists():
-                        try:
-                            with open(file_info.path, 'rb') as f:
-                                while True:
-                                    chunk = f.read(64 * 1024)  # 64KB 块
-                                    if not chunk:
-                                        break
-                                    writer.write(chunk)
-                        except (OSError, IOError) as e:
-                            raise CompressionError(f"读取文件失败 {file_info.path}: {e}")
+                    try:
+                        with open(file_info.path, 'rb') as f:
+                            while True:
+                                chunk = f.read(64 * 1024)  # 64KB 块
+                                if not chunk:
+                                    break
+                                writer.write(chunk)
+                    except (OSError, IOError) as e:
+                        raise CompressionError(f"读取文件失败 {file_info.path}: {e}")
                     
                     processed_bytes += file_info.size
             
@@ -308,12 +307,11 @@ class ZipCompressor(Compressor):
                         zf.writestr(zipfile.ZipInfo(archive_path), '')
                     else:
                         # 添加文件
-                        if file_info.path.exists():
-                            try:
-                                zf.write(file_info.path, archive_path)
-                                processed_bytes += file_info.size
-                            except (OSError, IOError) as e:
-                                raise CompressionError(f"添加文件到 Zip 失败 {file_info.path}: {e}")
+                        try:
+                            zf.write(file_info.path, archive_path)
+                            processed_bytes += file_info.size
+                        except (OSError, IOError) as e:
+                            raise CompressionError(f"添加文件到 Zip 失败 {file_info.path}: {e}")
             
             return output_stream.tell() if hasattr(output_stream, 'tell') else processed_bytes
             

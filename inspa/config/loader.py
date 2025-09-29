@@ -151,10 +151,14 @@ class ConfigLoader:
         Raises:
             ConfigValidationError: 配置验证错误
         """
+        # 创建数据副本避免修改原数据
+        data = json.loads(json.dumps(data))  # 深拷贝
+        
         if base_path:
-            # 创建数据副本避免修改原数据
-            data = json.loads(json.dumps(data))  # 深拷贝
             self._resolve_relative_paths(data, base_path)
+        
+        # 应用兼容性修复
+        self._apply_compatibility_fixes(data)
         
         try:
             config = InspaConfig.from_dict(data)
@@ -225,10 +229,12 @@ class ConfigLoader:
             if 'icon_path' in install_section:
                 icon_path = install_section.pop('icon_path')
                 
-                # 确保 resources 部分存在
-                if 'resources' not in data:
+                # 确保 resources 部分存在且不为 None
+                if 'resources' not in data or data['resources'] is None:
                     data['resources'] = {}
-                elif not isinstance(data['resources'], dict):
+                
+                # 如果 resources 不是字典，重置为空字典
+                if not isinstance(data['resources'], dict):
                     data['resources'] = {}
                 
                 # 移动 icon_path 到 resources.icon

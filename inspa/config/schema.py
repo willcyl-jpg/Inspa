@@ -331,7 +331,20 @@ class InspaConfig(BaseModel):
 
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典格式"""
-        return self.model_dump(exclude_none=True, by_alias=True)
+        data = self.model_dump(exclude_none=True, by_alias=True)
+        
+        # 转换 Path 对象和枚举为字符串
+        def convert_values(obj):
+            if isinstance(obj, dict):
+                return {k: convert_values(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_values(item) for item in obj]
+            elif isinstance(obj, (Path, Enum)):
+                return str(obj)
+            else:
+                return obj
+        
+        return convert_values(data)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'InspaConfig':

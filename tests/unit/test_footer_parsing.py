@@ -61,9 +61,12 @@ def test_footer_present_and_correct(tmp_path: Path):
 
 
 def test_legacy_scan_backward_compatibility(tmp_path: Path):
+    files = make_temp_files(tmp_path)
     cfg = build_config(tmp_path)
     out = tmp_path / 'installer.exe'
-    Builder().build(cfg, out)
+    builder = Builder()
+    res = builder.build(cfg, out)
+    assert res.success and out.exists()
     raw = out.read_bytes()
     # simulate legacy by stripping footer only
     legacy = raw[:-FOOTER_SIZE]
@@ -76,9 +79,12 @@ def test_legacy_scan_backward_compatibility(tmp_path: Path):
 
 
 def test_stats_in_header(tmp_path: Path):
+    files = make_temp_files(tmp_path)
     cfg = build_config(tmp_path)
     out = tmp_path / 'installer.exe'
-    Builder().build(cfg, out)
+    builder = Builder()
+    res = builder.build(cfg, out)
+    assert res.success and out.exists()
     data = out.read_bytes()
     footer = data[-FOOTER_SIZE:]
     magic, h_off, h_len, c_off, c_size, hash_bytes = struct.unpack('<8sQQQQ32s', footer)

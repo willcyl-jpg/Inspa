@@ -81,7 +81,7 @@ class FileCollector:
                 file_info = self._create_file_info(
                     input_path, 
                     input_path.parent,  # 使用文件所在目录作为基准
-                    input_path.name     # 相对路径就是文件名
+                    Path(input_path.name)     # 相对路径就是文件名
                 )
                 
                 if file_info and file_info.path not in added_files:
@@ -97,6 +97,10 @@ class FileCollector:
                 if input_config.recursive:
                     # 递归扫描
                     for file_path in self._walk_directory(input_path):
+                        # 跳过输入目录本身
+                        if file_path == input_path:
+                            continue
+                            
                         relative_path = self._calculate_relative_path(
                             file_path, base_path, input_path, input_config.preserve_structure
                         )
@@ -283,12 +287,9 @@ class FileCollector:
         
         # 目录模式匹配（以 / 结尾）
         if pattern.endswith('/'):
-            dir_pattern = pattern.rstrip('/')
-            # 匹配目录本身
-            if fnmatch.fnmatch(path, dir_pattern):
-                return True
-            # 匹配目录内的所有文件
-            if path.startswith(dir_pattern + '/'):
+            dir_pattern = pattern.rstrip('/')  # "exclude_dir"
+            # 检查路径是否包含排除目录
+            if dir_pattern in path.split('/'):
                 return True
         
         # 扩展名匹配（以 * 开头）
@@ -301,7 +302,7 @@ class FileCollector:
         if '/' in pattern:
             # 支持路径中的 glob 模式
             path_parts = path.split('/')
-            pattern_parts = pattern.split('/')
+            pattern_parts = [p for p in pattern.split('/') if p]  # 移除空字符串
             
             # 检查是否有部分匹配
             for i in range(len(path_parts) - len(pattern_parts) + 1):

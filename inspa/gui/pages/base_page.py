@@ -7,6 +7,8 @@ class BasePage(ctk.CTkFrame):
         super().__init__(parent, fg_color="transparent", **kwargs)
         self.parent = parent
         self.controller = controller
+        # 确保页面填满父容器
+        self.pack(fill="both", expand=True)
         self.setup_ui()
 
     def setup_ui(self):
