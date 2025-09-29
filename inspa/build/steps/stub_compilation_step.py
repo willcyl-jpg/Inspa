@@ -51,7 +51,7 @@ class StubCompilationStep(BuildStep):
 
     def _get_runtime_stub(self, config) -> bytes:
         """获取 Runtime Stub 数据"""
-        need_custom = bool(getattr(config, 'resources', None) and config.resources and config.resources.icon)
+        need_custom = bool(config.install.icon_path)
         # 版本信息始终需要注入
         need_custom = True  # 直接强制动态编译以便写入版本信息和图标
 
@@ -209,14 +209,10 @@ class StubCompilationStep(BuildStep):
 
                 # 处理UI和UAC设置（仅在非spec模式下）
                 if not use_spec:
-                    try:
-                        if config.install.show_ui and "--console" in cmd:
-                            cmd[cmd.index("--console")] = "--noconsole"
-                            info("启用 UI: 隐藏控制台窗口", stage=LogStage.STUB)
-                        else:
-                            info("未启用 UI: 使用控制台窗口", stage=LogStage.STUB)
-                    except AttributeError:
-                        warning("install.show_ui 未定义, 使用默认控制台窗口", stage=LogStage.STUB)
+                    # 默认启用 UI（隐藏控制台窗口）
+                    if "--console" in cmd:
+                        cmd[cmd.index("--console")] = "--noconsole"
+                        info("启用 UI: 隐藏控制台窗口", stage=LogStage.STUB)
 
                 if not use_spec:
                     try:
@@ -226,8 +222,8 @@ class StubCompilationStep(BuildStep):
                     except AttributeError:
                         warning("install.require_admin 未定义, 跳过 UAC", stage=LogStage.STUB)
 
-                    if getattr(config, "resources", None) and config.resources and config.resources.icon:
-                        icon_path = str(config.resources.icon)
+                    if config.install.icon_path:
+                        icon_path = str(config.install.icon_path)
                         cmd.extend(["--icon", icon_path])
                         info(f"添加图标: {icon_path}", stage=LogStage.STUB)
 
@@ -311,8 +307,8 @@ class StubCompilationStep(BuildStep):
                 modified_content = modified_content.replace(')', f',\n    {version_param}\n)')
 
         # 添加icon参数（如果配置中有）
-        if getattr(config, "resources", None) and config.resources and config.resources.icon:
-            icon_path = str(config.resources.icon)
+        if config.install.icon_path:
+            icon_path = str(config.install.icon_path)
             if 'icon=' in modified_content:
                 # 如果已有icon，替换它
                 modified_content = re.sub(r"icon=r?'[^']*'", f"icon=r'{re.escape(str(icon_path))}'", modified_content)

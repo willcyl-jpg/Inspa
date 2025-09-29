@@ -65,15 +65,7 @@ def build_command(
         config_obj = load_config(config_path)
 
         # 统一运行时：不再区分 GUI / CLI 构建，始终包含 GUI 能力；运行时可用 --cli 参数强制命令行。
-        try:
-            if not config_obj.install.show_ui:
-                # 若用户关闭了 show_ui，我们仍保留该标记，这样运行时默认走 CLI，使用者可省略 --cli。
-                console.print("[yellow]配置中禁用了 show_ui，构建后默认以命令行模式运行 (可去掉该配置或传 --cli 强制)\n[/yellow]")
-            else:
-                console.print("[yellow]构建统一运行时 (含 GUI + CLI 双模式)\n[/yellow]")
-        except AttributeError:
-            console.print("[red]配置对象缺少 install.show_ui 字段 (Schema 版本问题?)\n[/red]")
-            raise typer.Exit(1)
+        console.print("[yellow]构建统一运行时 (含 GUI + CLI 双模式)\n[/yellow]")
         
         # 如果指定了图标，更新配置
         if icon:
@@ -86,7 +78,7 @@ def build_command(
                 from ...config.schema import ResourcesModel
                 # 显式传入 icon=None 以兼容某些静态分析器
                 config_obj.resources = ResourcesModel(icon=None)
-            config_obj.resources.icon = icon_path
+            config_obj.install.icon_path = icon_path
         
         # 创建构建器
         builder = Builder()

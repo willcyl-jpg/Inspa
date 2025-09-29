@@ -585,7 +585,9 @@ if __name__ == '__main__':
     import argparse
     p = argparse.ArgumentParser(); p.add_argument('--dir', type=str, default=None); p.add_argument('--cli', action='store_true')
     a = p.parse_args(); rt = InstallerRuntime(Path(sys.argv[0])); ok = False
-    if not a.cli and GUI_AVAILABLE:
+    # 检查是否强制使用 CLI 模式
+    force_cli = a.cli
+    if not force_cli and GUI_AVAILABLE:
         try:
             rt._parse()
         except:

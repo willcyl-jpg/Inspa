@@ -410,11 +410,11 @@ class HeaderBuilder:
             'default_path': config.install.default_path,
             'allow_user_path': config.install.allow_user_path,
             'force_hidden_path': config.install.force_hidden_path,
-            'show_ui': config.install.show_ui,
             'silent_allowed': config.install.silent_allowed,
             'require_admin': config.install.require_admin,
             'license_file': str(config.install.license_file) if config.install.license_file else None,
             'privacy_file': str(config.install.privacy_file) if config.install.privacy_file else None,
+            'icon_path': str(config.install.icon_path) if config.install.icon_path else None,
         }
     
     def _build_compression_info(self, config: InspaConfig, actual_algo: CompressionAlgorithm) -> Dict[str, Any]:

@@ -67,24 +67,6 @@ class ProductModel(BaseModel):
         return v
 
 
-class ResourcesModel(BaseModel):
-    """资源配置模型"""
-    icon: Optional[Union[str, Path]] = Field(None, description="自定义图标路径 (.ico 文件)")
-
-    @field_validator('icon')
-    @classmethod
-    def validate_icon_path(cls, v: Optional[Union[str, Path]]) -> Optional[Path]:
-        """验证图标文件路径"""
-        if v is None:
-            return None
-        
-        icon_path = Path(v)
-        if not icon_path.suffix.lower() == '.ico':
-            raise ValueError("图标文件必须是 .ico 格式")
-        
-        return icon_path
-
-
 class UIModel(BaseModel):
     """UI 配置模型"""
     window_title: Optional[str] = Field(
@@ -127,10 +109,6 @@ class InstallModel(BaseModel):
         False, 
         description="是否强制隐藏路径选择（自动使用默认路径）"
     )
-    show_ui: bool = Field(
-        True, 
-        description="是否显示安装界面"
-    )
     silent_allowed: bool = Field(
         True, 
         description="是否允许静默安装"
@@ -146,6 +124,10 @@ class InstallModel(BaseModel):
     require_admin: bool = Field(
         False, 
         description="是否需要管理员权限"
+    )
+    icon_path: Optional[Union[str, Path]] = Field(
+        None,
+        description="自定义图标路径 (.ico 文件)"
     )
 
     @field_validator('default_path')
@@ -295,7 +277,6 @@ class InspaConfig(BaseModel):
     inputs: List[InputPathModel] = Field(..., description="输入文件/目录列表", min_length=1)
     
     # 可选部分
-    resources: Optional[ResourcesModel] = Field(None, description="资源配置")
     ui: UIModel = Field(default_factory=UIModel, description="UI 配置")
     compression: CompressionModel = Field(default_factory=CompressionModel, description="压缩配置")
     exclude: Optional[List[str]] = Field(None, description="排除模式列表（glob 格式）")

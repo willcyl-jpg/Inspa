@@ -24,7 +24,6 @@ def build_basic_config(tmp_path: Path) -> InspaConfig:
         default_path=str(tmp_path / 'install'),
         allow_user_path=True,
         force_hidden_path=False,
-        show_ui=False,
         silent_allowed=True,
         license_file=None,
         privacy_file=None,

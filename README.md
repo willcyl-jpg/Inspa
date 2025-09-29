@@ -74,10 +74,10 @@ product:
 install:
   default_path: "%ProgramFiles%/MyApp"
   allow_user_path: true
-  show_ui: true
   silent_allowed: true
   license_file: "./LICENSE.txt"
   require_admin: false # 若使用 %ProgramFiles% 会在验证阶段自动提升为 true
+  icon_path: "./app.ico" # 自定义图标
 
 ui:
   window_title: "MyApp 安装程序"
@@ -114,9 +114,6 @@ env:
   set:
     MYAPP_ENV: production
   system_scope: false
-
-resources:
-  icon: assets/app.ico
 ```
 
 3. 构建（无需再选择 GUI/CLI 版本，始终是统一运行时）：
@@ -137,13 +134,11 @@ inspa build -c installer.yaml -o dist/MyAppInstaller.exe --verbose
 
 自 0.1.x 起已移除构建时 `--runtime` 选项，始终构建“统一运行时”：
 
-| 模式 | 触发方式                                                        | 行为                                           |
-| ---- | --------------------------------------------------------------- | ---------------------------------------------- |
-| GUI  | 默认（存在 tkinter 且未传 `--cli` 且配置 install.show_ui=true） | 安装向导：路径选择、许可协议、进度条、脚本输出 |
-| CLI  | 传入 `--cli` 或 GUI 初始化失败 / 配置 show_ui=false             | 纯文本输出，适合无人值守 / 终端环境            |
-| 静默 | 传入 `/S` 且配置 silent_allowed=true                            | 无交互，按默认路径安装                         |
-
-若配置 `install.show_ui: false`，运行时会直接进入 CLI；设置为 true 获取 GUI。
+| 模式 | 触发方式                             | 行为                                           |
+| ---- | ------------------------------------ | ---------------------------------------------- |
+| GUI  | 默认（存在 tkinter 且未传 `--cli`）  | 安装向导：路径选择、许可协议、进度条、脚本输出 |
+| CLI  | 传入 `--cli` 或 GUI 初始化失败       | 纯文本输出，适合无人值守 / 终端环境            |
+| 静默 | 传入 `/S` 且配置 silent_allowed=true | 无交互，按默认路径安装                         |
 
 统一的理由：
 

@@ -78,7 +78,6 @@ class TestInstallModel:
             default_path="C:/Program Files/TestApp",
             allow_user_path=True,
             force_hidden_path=False,
-            show_ui=True,
             silent_allowed=True,
             require_admin=False
         )
@@ -271,7 +270,7 @@ class TestInspaConfig:
             ],
             env=EnvironmentModel(add_path=["C:/bin"])
         )
-        assert config.resources.icon.name == "icon.ico"
+        assert config.install.icon_path == Path("icon.ico")
         assert config.compression.algo == CompressionAlgorithm.ZSTD
         assert len(config.post_actions) == 1
 
@@ -552,7 +551,7 @@ class TestConfigLoader:
             },
             "install": {
                 "default_path": "C:/TestApp",
-                "icon_path": "icon.ico"  # 旧格式
+                "icon_path": "icon.ico"  # 直接在 install 下
             },
             "inputs": [
                 {"path": "C:/source"}
@@ -562,11 +561,8 @@ class TestConfigLoader:
         loader = ConfigLoader()
         config = loader.load_from_dict(old_format_data)
 
-        # icon_path 应该被移动到 resources.icon
-        assert config.resources is not None
-        assert config.resources.icon == Path("icon.ico")
-        # 原始字段应该不存在
-        assert not hasattr(config.install, 'icon_path')
+        # icon_path 应该存在于 install 中
+        assert config.install.icon_path == Path("icon.ico")
 
 
 class TestGlobalFunctions:

@@ -222,26 +222,9 @@ class ConfigLoader:
         Args:
             data: 配置数据字典（原地修改）
         """
-        # 修复：将 install.icon_path 移动到 resources.icon
-        if 'install' in data and isinstance(data['install'], dict):
-            install_section = data['install']
-            
-            if 'icon_path' in install_section:
-                icon_path = install_section.pop('icon_path')
-                
-                # 确保 resources 部分存在且不为 None
-                if 'resources' not in data or data['resources'] is None:
-                    data['resources'] = {}
-                
-                # 如果 resources 不是字典，重置为空字典
-                if not isinstance(data['resources'], dict):
-                    data['resources'] = {}
-                
-                # 移动 icon_path 到 resources.icon
-                data['resources']['icon'] = icon_path
-        
         # 可以在这里添加其他兼容性修复
         # 例如：处理旧的字段名称、默认值变更等
+        pass
 
     def _resolve_relative_paths(self, data: Dict[str, Any], base_path: Path) -> None:
         """解析配置中的相对路径
@@ -252,7 +235,7 @@ class ConfigLoader:
         """
         # 需要解析相对路径的字段
         path_fields = [
-            ('resources', 'icon'),
+            ('install', 'icon_path'),
             ('install', 'license_file'),
             ('install', 'privacy_file'),
         ]
